@@ -172,29 +172,19 @@ object NoteBodyLoader {
                 ?: runCatching { NoteBodyEditor.readText(candidate) }.getOrNull()
             if (visible != null) {
                 val spans = runCatching { NoteBodyEditor.parseAttributeRuns(candidate) }.getOrElse { emptyList() }
-                val writable = !forceReadOnly &&
-                    source == NoteBodySource.TEXT_DATA_ENCRYPTED &&
-                    kind == NoteProtoKind.NOTE_STORE_PROTO
                 Log.i(
                     TAG,
                     "decoded source=$source kind=$kind chars=${visible.length} " +
-                        "spans=${spans.size} writable=$writable",
+                        "spans=${spans.size} (app is read-only)",
                 )
                 return ResolvedNoteBody(
                     visibleText = visible,
                     attrSpans = spans,
                     source = source,
-                    readOnly = !writable,
+                    readOnly = true,
                     protoKind = kind,
                     titleFallback = titleFallback,
-                    statusMessage = when {
-                        writable -> null
-                        source == NoteBodySource.TEXT_DATA_ASSET ->
-                            "Read only — large notes stored as a CloudKit asset can’t be edited yet."
-                        kind == NoteProtoKind.MERGABLE_DATA ->
-                            "Read only — modern collaborative note format."
-                        else -> "Read only — this note’s format isn’t safely writable yet."
-                    },
+                    statusMessage = null,
                 )
             }
             Log.i(TAG, "candidate len=${candidate.size} kind=$kind did not yield topotext")
@@ -212,14 +202,14 @@ object NoteBodyLoader {
                 readOnly = true,
                 protoKind = NoteProtoKind.MERGABLE_DATA,
                 titleFallback = titleFallback,
-                statusMessage = "Read only — decoded from modern MergeableData.",
+                statusMessage = null,
             )
         }
 
         return emptyFailure(
             source = source,
             titleFallback = titleFallback,
-            statusMessage = "Downloaded the note body but couldn’t decode it yet.",
+            statusMessage = "Couldn’t decode this note’s body yet.",
         )
     }
 

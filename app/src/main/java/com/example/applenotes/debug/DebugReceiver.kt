@@ -281,6 +281,10 @@ class DebugReceiver : BroadcastReceiver() {
                     Log.i(TAG, "CREATE_OK ${created.recordName}")
                 }
             }
+            ACTION_PROBE_PINNED -> launchOp("PROBE_PINNED") { client, _ ->
+                client.probePinnedSignal()
+                Log.i(TAG, "PROBE_PINNED_OK")
+            }
             else -> Log.w(TAG, "RECV unknown action=$action")
         }
     }
@@ -392,6 +396,7 @@ class DebugReceiver : BroadcastReceiver() {
         private const val ACTION_DUMP_RECORD = "com.example.applenotes.DUMP_RECORD"
         private const val ACTION_DUMP_TEXT_ASSET = "com.example.applenotes.DUMP_TEXT_ASSET"
         private const val ACTION_CREATE = "com.example.applenotes.CREATE"
+        private const val ACTION_PROBE_PINNED = "com.example.applenotes.PROBE_PINNED"
 
         private val httpClient by lazy {
             HttpClient(OkHttp) { expectSuccess = false }

@@ -697,6 +697,56 @@ class AppleNotesClient(
         }
     }
 
+    /**
+     * Best-effort discovery of whether CloudKit exposes pin state for Notes.
+     * Logs results under [TAG]; used by the debug receiver. Pin state is known
+     * to live in local NoteStore (`ZISPINNED`) on Apple devices — it may not
+     * sync through the web CloudKit API we use.
+     */
+    suspend fun probePinnedSignal() {
+        val pinKeys = listOf("Pinned", "IsPinned", "PinnedDate", "DatePinned", "PinnedNotes")
+        val balanceId = "F490E35C-DF10-4992-922B-E9919F2546FA"
+        val banksId = "929149ED-0298-479C-B826-97AA2A4A1099"
+        for (rn in listOf(balanceId, banksId)) {
+            val payload: JsonObject = buildJsonObject {
+                put("zoneID", buildJsonObject { put("zoneName", "Notes") })
+                putJsonArray("records") {
+                    add(buildJsonObject {
+                        put("recordName", rn)
+                        putJsonArray("desiredKeys") {
+                            (pinKeys + listOf("TitleEncrypted", "ModificationDate")).forEach {
+                                add(JsonPrimitive(it))
+                            }
+                        }
+                    })
+                }
+            }
+            val (status, raw) = postJson("/records/lookup", payload)
+            Log.i(TAG, "probePinned lookup $rn HTTP $status body=${raw.take(1200)}")
+        }
+        for (indexName in listOf("pinned", "Pinned", "pins", "PinnedNotes", "favorites")) {
+            val payload: JsonObject = buildJsonObject {
+                put("zoneID", buildJsonObject { put("zoneName", "Notes") })
+                put("resultsLimit", 20)
+                put("query", buildJsonObject {
+                    put("recordType", "SearchIndexes")
+                    putJsonArray("filterBy") {
+                        add(buildJsonObject {
+                            put("comparator", "EQUALS")
+                            put("fieldName", "indexName")
+                            put("fieldValue", buildJsonObject {
+                                put("type", "STRING")
+                                put("value", indexName)
+                            })
+                        })
+                    }
+                })
+            }
+            val (status, raw) = postJson("/records/query", payload)
+            Log.i(TAG, "probePinned index='$indexName' HTTP $status body=${raw.take(600)}")
+        }
+    }
+
     private suspend fun postJson(relPath: String, payload: JsonObject): Pair<Int, String> {
         val url = buildString {
             append(session.ckdatabasewsUrl)

@@ -40,6 +40,7 @@
                 <action android:name="com.example.applenotes.DUMP_RECORD" />
                 <action android:name="com.example.applenotes.DUMP_TEXT_ASSET" />
                 <action android:name="com.example.applenotes.CREATE" />
+                <action android:name="com.example.applenotes.PROBE_PINNED" />
             </intent-filter>
         </receiver>
     </application>
