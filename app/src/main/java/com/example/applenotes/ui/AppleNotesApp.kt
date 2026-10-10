@@ -35,10 +35,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.automirrored.filled.Note
+import androidx.compose.material.icons.filled.BrightnessAuto
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.LightMode
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
@@ -103,6 +106,7 @@ import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.res.painterResource
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import android.content.Intent
@@ -131,10 +135,12 @@ import com.example.applenotes.client.AppleNotesClient
 import com.example.applenotes.client.FolderSummary
 import com.example.applenotes.client.NoteRecord
 import com.example.applenotes.client.NoteSummary
+import com.example.applenotes.R
 import com.example.applenotes.proto.NoteAppender
 import com.example.applenotes.proto.NoteBodyEditor
 import com.example.applenotes.proto.NoteBodyLoader
 import com.example.applenotes.proto.ResolvedNoteBody
+import com.example.applenotes.theme.ThemeMode
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import kotlinx.coroutines.Job
@@ -198,7 +204,10 @@ private const val TRASH_RECORD_NAME = "TrashFolder-CloudKit"
 private const val DEFAULT_FOLDER_RECORD_NAME = "DefaultFolder-CloudKit"
 
 @Composable
-fun AppleNotesApp() {
+fun AppleNotesApp(
+    themeMode: ThemeMode = ThemeMode.SYSTEM,
+    onThemeModeChange: (ThemeMode) -> Unit = {},
+) {
     val context = LocalContext.current
     val cookieReader = remember { CookieReader() }
     val httpClient = remember {
@@ -346,6 +355,8 @@ fun AppleNotesApp() {
                 folders = s.folders,
                 selectedFolder = s.selectedFolder,
                 bodyIndex = bodyIndex,
+                themeMode = themeMode,
+                onThemeModeChange = onThemeModeChange,
                 onSelectFolder = { folderRn ->
                     state = s.copy(selectedFolder = folderRn)
                 },
@@ -654,6 +665,8 @@ private fun NotesListScreen(
     folders: List<FolderSummary>,
     selectedFolder: String?,
     bodyIndex: Map<String, String>,
+    themeMode: ThemeMode,
+    onThemeModeChange: (ThemeMode) -> Unit,
     onSelectFolder: (String?) -> Unit,
     onSelect: (NoteSummary) -> Unit,
     onRefresh: () -> Unit,
@@ -704,6 +717,9 @@ private fun NotesListScreen(
                 folders = folders,
                 allNotes = allNotes,
                 selectedFolder = selectedFolder,
+                themeMode = themeMode,
+                onThemeModeChange = onThemeModeChange,
+                onClose = { drawerScope.launch { drawerState.close() } },
                 onSelect = { rn ->
                     onSelectFolder(rn)
                     drawerScope.launch { drawerState.close() }
@@ -814,6 +830,9 @@ private fun FoldersDrawer(
     folders: List<FolderSummary>,
     allNotes: List<NoteSummary>,
     selectedFolder: String?,
+    themeMode: ThemeMode,
+    onThemeModeChange: (ThemeMode) -> Unit,
+    onClose: () -> Unit,
     onSelect: (String?) -> Unit,
     onSignOut: () -> Unit,
 ) {
@@ -831,12 +850,26 @@ private fun FoldersDrawer(
                 .fillMaxHeight()
                 .verticalScroll(rememberScrollState()),
         ) {
-            Text(
-                "Notes of Fruit",
-                style = MaterialTheme.typography.headlineMedium,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.padding(start = 24.dp, top = 24.dp, bottom = 8.dp),
-            )
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(start = 24.dp, end = 8.dp, top = 16.dp, bottom = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "Notes of Fruit",
+                    style = MaterialTheme.typography.headlineMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f),
+                )
+                IconButton(onClick = onClose) {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_panel_close),
+                        contentDescription = "Close menu",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
             // "All notes" pseudo-folder
             DrawerFolderRow(
                 label = "All notes",
@@ -869,23 +902,62 @@ private fun FoldersDrawer(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .clickable(onClick = onSignOut)
-                    .padding(horizontal = 24.dp, vertical = 16.dp),
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Icon(
-                    Icons.AutoMirrored.Filled.Logout,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.width(16.dp))
-                Text(
-                    "Sign out",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                Row(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clickable(onClick = onSignOut)
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Filled.Logout,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.width(16.dp))
+                    Text(
+                        "Sign out",
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                ThemeModeSwitcher(
+                    themeMode = themeMode,
+                    onThemeModeChange = onThemeModeChange,
                 )
             }
         }
+    }
+}
+
+@Composable
+private fun ThemeModeSwitcher(
+    themeMode: ThemeMode,
+    onThemeModeChange: (ThemeMode) -> Unit,
+) {
+    val (icon, label) = when (themeMode) {
+        ThemeMode.SYSTEM -> Icons.Default.BrightnessAuto to "System theme"
+        ThemeMode.LIGHT -> Icons.Default.LightMode to "Light theme"
+        ThemeMode.DARK -> Icons.Default.DarkMode to "Dark theme"
+    }
+    IconButton(
+        onClick = {
+            val next = when (themeMode) {
+                ThemeMode.SYSTEM -> ThemeMode.LIGHT
+                ThemeMode.LIGHT -> ThemeMode.DARK
+                ThemeMode.DARK -> ThemeMode.SYSTEM
+            }
+            onThemeModeChange(next)
+        },
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = "$label. Tap to cycle dark, light, and system.",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 
