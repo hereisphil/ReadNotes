@@ -43,6 +43,14 @@ data class NoteSummary(
      *  - any other UUID            → user-created folder
      */
     val folderRecordName: String?,
+    /**
+     * True when the note is password-locked on Apple devices. CloudKit still
+     * returns a readable TitleEncrypted, but the body is AES-GCM encrypted with
+     * a key derived from the user's Notes password — not something this app can
+     * unwrap without implementing Apple's lock-note crypto (and prompting for
+     * that password). Presence of CryptoWrappedKey / CryptoSalt is the signal.
+     */
+    val locked: Boolean = false,
 )
 
 /** A folder the user has created (or one of Apple's special folders). */
@@ -63,6 +71,16 @@ data class NoteRecord(
     fun stringField(name: String): String? = rawFields[name]?.let { extractStringValue(it) }
     fun decodedTitle(): String? = rawFields["TitleEncrypted"]?.let { decodeEncryptedString(it) }
     fun assetDownloadUrl(name: String): String? = rawFields[name]?.let { extractAssetDownloadUrl(it) }
+    /** Password-locked note — see [NoteSummary.locked]. */
+    fun isPasswordLocked(): Boolean = isPasswordLockedFields(rawFields)
+}
+
+/** CloudKit fields present only on password-locked notes. */
+internal fun isPasswordLockedFields(fields: Map<String, JsonElement>?): Boolean {
+    if (fields == null) return false
+    return fields.containsKey("CryptoWrappedKey") ||
+        fields.containsKey("CryptoSalt") ||
+        fields.containsKey("CryptoTag")
 }
 
 /**
@@ -112,8 +130,16 @@ class AppleNotesClient(
                     }
                 })
                 putJsonArray("desiredKeys") {
-                    listOf("TitleEncrypted", "SnippetEncrypted", "ModificationDate", "Deleted", "Folder")
-                        .forEach { add(JsonPrimitive(it)) }
+                    listOf(
+                        "TitleEncrypted",
+                        "SnippetEncrypted",
+                        "ModificationDate",
+                        "Deleted",
+                        "Folder",
+                        // Present only on password-locked notes (AES-GCM wrap).
+                        "CryptoWrappedKey",
+                        "CryptoSalt",
+                    ).forEach { add(JsonPrimitive(it)) }
                 }
             }
             Log.i(TAG, "fetchRecents page=$page: requesting up to $remaining (have ${all.size}/$limit)")
@@ -135,6 +161,7 @@ class AppleNotesClient(
                         ?.let(::extractStringValue)?.toLongOrNull(),
                     deleted = rec.fields?.get("Deleted")?.let(::extractStringValue) == "1",
                     folderRecordName = rec.fields?.get("Folder")?.let(::extractReferenceRecordName),
+                    locked = isPasswordLockedFields(rec.fields),
                 )
             }
             all.addAll(pageResults)
@@ -243,7 +270,11 @@ class AppleNotesClient(
             recordChangeTag = rec.recordChangeTag,
             rawFields = rec.fields ?: emptyMap(),
         )
-        Log.i(TAG, "lookupNote: tag=${record.recordChangeTag} fields=${record.rawFields.keys}")
+        Log.i(
+            TAG,
+            "lookupNote: tag=${record.recordChangeTag} locked=${record.isPasswordLocked()} " +
+                "fields=${record.rawFields.keys}",
+        )
         record.stringField("TitleEncrypted")?.let {
             val decoded = runCatching { kotlin.io.encoding.Base64.decode(it).decodeToString() }.getOrNull()
             Log.i(TAG, "lookupNote TitleEncrypted decoded='${decoded?.take(60)}'")
@@ -255,7 +286,10 @@ class AppleNotesClient(
         record.stringField("ModificationDate")?.let {
             Log.i(TAG, "lookupNote ModificationDate=$it")
         }
-        logRecordSummary("lookupNote", record)
+        // Never let debug summarization fail the lookup — locked / exotic
+        // bodies regularly trip the protobuf walker.
+        runCatching { logRecordSummary("lookupNote", record) }
+            .onFailure { Log.w(TAG, "lookupNote summary skipped: ${it.message}") }
         return record
     }
 
@@ -600,6 +634,10 @@ class AppleNotesClient(
     }
 
     private fun logRecordSummary(label: String, record: NoteRecord, sentB64: String? = null) {
+        if (record.isPasswordLocked()) {
+            Log.i(TAG, "$label password-locked note — skipping body proto dump")
+            return
+        }
         val textB64 = record.stringField("TextDataEncrypted")
         if (textB64 != null) {
             val tag = if (sentB64 != null) " matchesSent=${textB64 == sentB64}" else ""
@@ -614,27 +652,36 @@ class AppleNotesClient(
                 }
                 Log.i(TAG, "$label TextDataEncrypted raw[0..32] hex=$prefix (totalRaw=${raw.size})")
             }
-            Log.i(TAG, "$label TextDataEncrypted proto: ${NoteBodyEditor.summarizeBase64(textB64)}")
+            Log.i(
+                TAG,
+                "$label TextDataEncrypted proto: ${
+                    runCatching { NoteBodyEditor.summarizeBase64(textB64) }.getOrElse { "summarize_failed: ${it.message}" }
+                }",
+            )
             if (label == "lookupNote") {
-                Log.i(TAG, "$label replicas dump:\n${NoteBodyEditor.dumpReplicasBase64(textB64)}")
-                Log.i(TAG, "$label attribute_runs dump:\n${NoteBodyEditor.dumpAttributeRunsBase64(textB64)}")
-                // Compare bag (insertion-order String.string) with visible-text walk.
-                // Mismatch => tombstoned content exists, or our walk is wrong.
-                val bag = NoteBodyEditor.readTextFromBase64(textB64)
-                val visible = NoteBodyEditor.readVisibleTextFromBase64(textB64)
-                Log.i(
-                    TAG,
-                    "$label bag.len=${bag?.length ?: -1} visible.len=${visible?.length ?: -1} " +
-                        "match=${bag != null && bag == visible}",
-                )
-                // Escape \n so each value fits on one logcat line — makes shell
-                // parsing in test harnesses ergonomic.
-                val esc = { s: String? ->
-                    s?.take(200)?.replace("\\", "\\\\")?.replace("\n", "\\n") ?: "<null>"
+                runCatching {
+                    Log.i(TAG, "$label replicas dump:\n${NoteBodyEditor.dumpReplicasBase64(textB64)}")
+                    Log.i(TAG, "$label attribute_runs dump:\n${NoteBodyEditor.dumpAttributeRunsBase64(textB64)}")
+                    // Compare bag (insertion-order String.string) with visible-text walk.
+                    // Mismatch => tombstoned content exists, or our walk is wrong.
+                    val bag = NoteBodyEditor.readTextFromBase64(textB64)
+                    val visible = NoteBodyEditor.readVisibleTextFromBase64(textB64)
+                    Log.i(
+                        TAG,
+                        "$label bag.len=${bag?.length ?: -1} visible.len=${visible?.length ?: -1} " +
+                            "match=${bag != null && bag == visible}",
+                    )
+                    // Escape \n so each value fits on one logcat line — makes shell
+                    // parsing in test harnesses ergonomic.
+                    val esc = { s: String? ->
+                        s?.take(200)?.replace("\\", "\\\\")?.replace("\n", "\\n") ?: "<null>"
+                    }
+                    Log.i(TAG, "$label bag='${esc(bag)}'")
+                    Log.i(TAG, "$label visible='${esc(visible)}'")
+                    Log.i(TAG, "$label substring tree:\n${NoteBodyEditor.dumpSubstringTreeBase64(textB64)}")
+                }.onFailure {
+                    Log.w(TAG, "$label body dump failed: ${it.message}")
                 }
-                Log.i(TAG, "$label bag='${esc(bag)}'")
-                Log.i(TAG, "$label visible='${esc(visible)}'")
-                Log.i(TAG, "$label substring tree:\n${NoteBodyEditor.dumpSubstringTreeBase64(textB64)}")
             }
         } else {
             Log.i(TAG, "$label has no TextDataEncrypted in returned fields (keys=${record.rawFields.keys})")
@@ -642,7 +689,11 @@ class AppleNotesClient(
         val replicaRegistryB64 = record.stringField("ReplicaIDToNotesVersionDataEncrypted")
         if (replicaRegistryB64 != null) {
             Log.i(TAG, "$label ReplicaIDToNotesVersionDataEncrypted.b64.len=${replicaRegistryB64.length}")
-            Log.i(TAG, "$label ReplicaIDToNotesVersion structure:\n${NoteBodyEditor.dumpRawBase64(replicaRegistryB64)}")
+            runCatching {
+                Log.i(TAG, "$label ReplicaIDToNotesVersion structure:\n${NoteBodyEditor.dumpRawBase64(replicaRegistryB64)}")
+            }.onFailure {
+                Log.w(TAG, "$label replica dump failed: ${it.message}")
+            }
         }
     }
 

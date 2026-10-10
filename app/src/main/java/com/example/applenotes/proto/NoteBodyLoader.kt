@@ -54,6 +54,18 @@ object NoteBodyLoader {
 
     suspend fun resolve(client: AppleNotesClient, record: NoteRecord): ResolvedNoteBody {
         val titleFallback = record.decodedTitle()
+        if (record.isPasswordLocked()) {
+            Log.i(TAG, "resolve ${record.recordName}: password-locked — body not readable here")
+            return ResolvedNoteBody(
+                visibleText = "",
+                attrSpans = emptyList(),
+                source = NoteBodySource.NONE,
+                readOnly = true,
+                protoKind = null,
+                titleFallback = titleFallback,
+                statusMessage = "This note is locked with a password on Apple devices and can’t be opened here.",
+            )
+        }
         val inlineB64 = record.stringField("TextDataEncrypted")
         if (inlineB64 != null) {
             return decodeFromBase64(

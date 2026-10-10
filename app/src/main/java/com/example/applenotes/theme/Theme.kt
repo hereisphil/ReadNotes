@@ -1,5 +1,6 @@
 package com.example.applenotes.theme
 
+import android.app.Activity
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
@@ -8,8 +9,11 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
 
 private val DarkColorScheme = darkColorScheme(
     primary = NotesYellow,
@@ -67,5 +71,22 @@ fun MyApplicationTheme(
         darkTheme -> DarkColorScheme
         else -> LightColorScheme
     }
+
+    // Status bar icons follow theme. Nav bar uses light glyphs (paired with
+    // the Compose dark scrim in MainActivity for light theme).
+    val view = LocalView.current
+    if (!view.isInEditMode) {
+        SideEffect {
+            val window = (view.context as Activity).window
+            val insets = WindowCompat.getInsetsController(window, view)
+            insets.isAppearanceLightStatusBars = !darkTheme
+            insets.isAppearanceLightNavigationBars = false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                window.isStatusBarContrastEnforced = false
+                window.isNavigationBarContrastEnforced = false
+            }
+        }
+    }
+
     MaterialTheme(colorScheme = colorScheme, typography = Typography, content = content)
 }

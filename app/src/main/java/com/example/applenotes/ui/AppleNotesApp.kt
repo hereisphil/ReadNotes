@@ -42,6 +42,7 @@ import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.LightMode
+import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
@@ -154,7 +155,11 @@ private sealed interface ScreenState {
     data object Splash : ScreenState
     data object Login : ScreenState
     data class Loading(val msg: String) : ScreenState
-    data class Error(val msg: String) : ScreenState
+    data class Error(
+        val msg: String,
+        /** When set, ErrorScreen offers Back that restores this list. */
+        val restoreList: NotesList? = null,
+    ) : ScreenState
     data class NotesList(
         val session: ICloudSession,
         val notes: List<NoteSummary>,
@@ -233,7 +238,13 @@ fun AppleNotesApp(
         if (bodyIndex.keys.any { it !in liveIds }) {
             bodyIndex = bodyIndex.filterKeys { it in liveIds }
         }
-        val missing = notes.filter { it.recordName !in bodyIndex }
+        // Locked notes have no searchable body here — mark them indexed empty
+        // so we don't hammer CloudKit / trip the protobuf walker on ciphertext.
+        val lockedMissing = notes.filter { it.locked && it.recordName !in bodyIndex }
+        if (lockedMissing.isNotEmpty()) {
+            bodyIndex = bodyIndex + lockedMissing.associate { it.recordName to "" }
+        }
+        val missing = notes.filter { !it.locked && it.recordName !in bodyIndex }
         if (missing.isEmpty()) return
         if (bodyIndexJob?.isActive == true) return
         bodyIndexJob = scope.launch {
@@ -242,10 +253,16 @@ fun AppleNotesApp(
                 if (!isActive) break
                 try {
                     val rec = client.lookupNote(note.recordName)
+                    if (rec.isPasswordLocked()) {
+                        bodyIndex = bodyIndex + (note.recordName to "")
+                        continue
+                    }
                     val resolved = NoteBodyLoader.resolve(client, rec)
                     bodyIndex = bodyIndex + (note.recordName to resolved.visibleText)
                 } catch (e: Throwable) {
                     Log.w(TAG, "body index failed for ${note.recordName}: ${e.message}")
+                    // Avoid retrying the same broken record forever this session.
+                    bodyIndex = bodyIndex + (note.recordName to "")
                 }
             }
         }
@@ -335,6 +352,10 @@ fun AppleNotesApp(
         is ScreenState.Loading -> CenteredSpinner(s.msg)
         is ScreenState.Error -> ErrorScreen(
             message = s.msg,
+            canGoBack = s.restoreList != null,
+            onBack = {
+                s.restoreList?.let { state = it }
+            },
             onRetry = {
                 scope.launch {
                     state = ScreenState.Loading("Retrying…")
@@ -361,42 +382,57 @@ fun AppleNotesApp(
                     state = s.copy(selectedFolder = folderRn)
                 },
                 onSelect = { note ->
+                    // Locked notes are intercepted in NotesListScreen (dialog).
                     scope.launch {
+                        val listSnapshot = s
                         state = ScreenState.Loading("Loading note…")
                         state = try {
-                            val client = AppleNotesClient(httpClient, s.session)
+                            val client = AppleNotesClient(httpClient, listSnapshot.session)
                             val rec = client.lookupNote(note.recordName)
-                            val resolved = NoteBodyLoader.resolve(client, rec)
-                            bodyIndex = bodyIndex + (rec.recordName to resolved.visibleText)
-                            ScreenState.Detail(
-                                session = s.session,
-                                record = rec,
-                                notesCache = s.notes,
-                                folders = s.folders,
-                                selectedFolder = s.selectedFolder,
-                                resolvedBody = resolved,
-                            )
+                            if (rec.isPasswordLocked()) {
+                                // List missed the Crypto* keys — still don't crash.
+                                listSnapshot
+                            } else {
+                                val resolved = NoteBodyLoader.resolve(client, rec)
+                                bodyIndex = bodyIndex + (rec.recordName to resolved.visibleText)
+                                ScreenState.Detail(
+                                    session = listSnapshot.session,
+                                    record = rec,
+                                    notesCache = listSnapshot.notes,
+                                    folders = listSnapshot.folders,
+                                    selectedFolder = listSnapshot.selectedFolder,
+                                    resolvedBody = resolved,
+                                )
+                            }
                         } catch (e: Throwable) {
-                            ScreenState.Error(e.message ?: e.toString())
+                            Log.e(TAG, "open note failed", e)
+                            ScreenState.Error(
+                                msg = e.message ?: e.toString(),
+                                restoreList = listSnapshot,
+                            )
                         }
                     }
                 },
                 onRefresh = {
                     scope.launch {
+                        val listSnapshot = s
                         state = ScreenState.Loading("Refreshing…")
                         state = try {
-                            val client = AppleNotesClient(httpClient, s.session)
+                            val client = AppleNotesClient(httpClient, listSnapshot.session)
                             val notes = client.fetchRecents(limit = 1000)
                                 .filter { !it.deleted }
                                 .sortedByDescending { it.modificationTimestampMs ?: 0L }
                             val folderIds = notes.mapNotNull { it.folderRecordName }.toSet()
-                            val folders = runCatching { client.lookupFolders(folderIds) }.getOrElse { s.folders }
+                            val folders = runCatching { client.lookupFolders(folderIds) }.getOrElse { listSnapshot.folders }
                             // Allow a fresh index pass for any notes not yet cached.
                             bodyIndexJob?.cancel()
                             bodyIndexJob = null
-                            ScreenState.NotesList(s.session, notes, folders, s.selectedFolder)
+                            ScreenState.NotesList(listSnapshot.session, notes, folders, listSnapshot.selectedFolder)
                         } catch (e: Throwable) {
-                            ScreenState.Error(e.message ?: e.toString())
+                            ScreenState.Error(
+                                msg = e.message ?: e.toString(),
+                                restoreList = listSnapshot,
+                            )
                         }
                     }
                 },
@@ -606,8 +642,31 @@ private fun CenteredSpinner(msg: String) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ErrorScreen(message: String, onRetry: () -> Unit, onSignOut: () -> Unit) {
-    Scaffold(topBar = { TopAppBar(title = { Text("Notes of Fruit") }) }) { padding ->
+private fun ErrorScreen(
+    message: String,
+    canGoBack: Boolean,
+    onBack: () -> Unit,
+    onRetry: () -> Unit,
+    onSignOut: () -> Unit,
+) {
+    androidx.activity.compose.BackHandler(enabled = canGoBack, onBack = onBack)
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Notes of Fruit") },
+                navigationIcon = {
+                    if (canGoBack) {
+                        IconButton(onClick = onBack) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = "Back to notes",
+                            )
+                        }
+                    }
+                },
+            )
+        },
+    ) { padding ->
         Column(
             modifier = Modifier.fillMaxSize().padding(padding).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -615,6 +674,9 @@ private fun ErrorScreen(message: String, onRetry: () -> Unit, onSignOut: () -> U
             Text("Something went wrong", style = MaterialTheme.typography.titleMedium)
             Text(message, style = MaterialTheme.typography.bodySmall)
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                if (canGoBack) {
+                    Button(onClick = onBack) { Text("Back to notes") }
+                }
                 Button(onClick = onRetry) { Text("Retry") }
                 Button(onClick = onSignOut) { Text("Sign in again") }
             }
@@ -695,10 +757,17 @@ private fun NotesListScreen(
     val indexing = indexedCount < indexTotal
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val drawerScope = rememberCoroutineScope()
+    var lockedNoteTitle by remember { mutableStateOf<String?>(null) }
     // System back closes the drawer if it's open; otherwise let it fall
     // through (the activity-default behaviour exits the app from the list).
     androidx.activity.compose.BackHandler(enabled = drawerState.isOpen) {
         drawerScope.launch { drawerState.close() }
+    }
+    if (lockedNoteTitle != null) {
+        LockedNoteDialog(
+            title = lockedNoteTitle ?: "This note",
+            onDismiss = { lockedNoteTitle = null },
+        )
     }
     val selectedFolderName = remember(selectedFolder, folders) {
         when (selectedFolder) {
@@ -815,7 +884,16 @@ private fun NotesListScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     items(filtered, key = { it.recordName }) { note ->
-                        NoteCard(note, onClick = { onSelect(note) })
+                        NoteCard(
+                            note = note,
+                            onClick = {
+                                if (note.locked) {
+                                    lockedNoteTitle = note.title?.takeIf { it.isNotBlank() } ?: "This note"
+                                } else {
+                                    onSelect(note)
+                                }
+                            },
+                        )
                     }
                     item { Spacer(Modifier.height(24.dp)) }
                 }
@@ -1047,14 +1125,28 @@ private fun NoteCard(note: NoteSummary, onClick: () -> Unit) {
             modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp),
         ) {
-            Text(
-                text = note.title?.takeIf { it.isNotBlank() } ?: "Untitled",
-                style = MaterialTheme.typography.titleMedium,
-                fontWeight = FontWeight.SemiBold,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (note.locked) {
+                    Icon(
+                        imageVector = Icons.Default.Lock,
+                        contentDescription = "Locked",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
+                Text(
+                    text = note.title?.takeIf { it.isNotBlank() } ?: "Untitled",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+            }
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -1067,7 +1159,13 @@ private fun NoteCard(note: NoteSummary, onClick: () -> Unit) {
                         fontWeight = FontWeight.Medium,
                     )
                 }
-                if (!note.snippet.isNullOrBlank()) {
+                if (note.locked) {
+                    Text(
+                        text = "Locked",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                } else if (!note.snippet.isNullOrBlank()) {
                     Text(
                         text = note.snippet,
                         style = MaterialTheme.typography.bodySmall,
@@ -1079,6 +1177,31 @@ private fun NoteCard(note: NoteSummary, onClick: () -> Unit) {
             }
         }
     }
+}
+
+@Composable
+private fun LockedNoteDialog(title: String, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        icon = {
+            Icon(
+                Icons.Default.Lock,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        },
+        title = { Text("Note is locked") },
+        text = {
+            Text(
+                "“$title” is password-protected on your Apple devices. " +
+                    "Notes of Fruit can’t unlock or show its contents — open it in " +
+                    "Apple Notes (or iCloud.com) instead.",
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text("OK") }
+        },
+    )
 }
 
 private fun humanRelative(epochMs: Long): String {
