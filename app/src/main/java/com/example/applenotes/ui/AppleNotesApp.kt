@@ -136,6 +136,8 @@ import com.example.applenotes.client.NoteRecord
 import com.example.applenotes.client.NoteSummary
 import com.example.applenotes.proto.NoteAppender
 import com.example.applenotes.proto.NoteBodyEditor
+import com.example.applenotes.proto.NoteBodyLoader
+import com.example.applenotes.proto.ResolvedNoteBody
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import kotlinx.coroutines.launch
@@ -184,6 +186,12 @@ private sealed interface ScreenState {
          * recordName = "", empty fields).
          */
         val pendingFolderRef: kotlinx.serialization.json.JsonElement? = null,
+        /**
+         * Pre-resolved body (inline TextDataEncrypted or downloaded
+         * TextDataAsset). Null only for local drafts that have not been
+         * created on the server yet.
+         */
+        val resolvedBody: ResolvedNoteBody? = null,
     ) : ScreenState
 }
 
@@ -313,8 +321,17 @@ fun AppleNotesApp() {
                 scope.launch {
                     state = ScreenState.Loading("Loading note…")
                     state = try {
-                        val rec = AppleNotesClient(httpClient, s.session).lookupNote(note.recordName)
-                        ScreenState.Detail(s.session, rec, s.notes, s.folders, s.selectedFolder)
+                        val client = AppleNotesClient(httpClient, s.session)
+                        val rec = client.lookupNote(note.recordName)
+                        val resolved = NoteBodyLoader.resolve(client, rec)
+                        ScreenState.Detail(
+                            session = s.session,
+                            record = rec,
+                            notesCache = s.notes,
+                            folders = s.folders,
+                            selectedFolder = s.selectedFolder,
+                            resolvedBody = resolved,
+                        )
                     } catch (e: Throwable) {
                         ScreenState.Error(e.message ?: e.toString())
                     }
@@ -399,6 +416,7 @@ fun AppleNotesApp() {
         )
         is ScreenState.Detail -> NoteDetailScreen(
             record = s.record,
+            resolvedBody = s.resolvedBody,
             saving = saving,
             savedHint = lastSavedHint,
             lastSavedAtMs = lastSavedAtMs,
@@ -419,6 +437,13 @@ fun AppleNotesApp() {
             },
             onSave = { newBody, isPureAppend, alsoExit, newSpans ->
                 scope.launch {
+                    if (s.resolvedBody?.readOnly == true) {
+                        lastSavedHint = "This note is read-only."
+                        if (alsoExit) {
+                            state = ScreenState.NotesList(s.session, s.notesCache, s.folders, s.selectedFolder)
+                        }
+                        return@launch
+                    }
                     saving = true
                     try {
                         val uuid = ourReplicaUuid
@@ -539,10 +564,21 @@ fun AppleNotesApp() {
                         val current = state
                         val sameDetail = current is ScreenState.Detail &&
                             current.record.recordName == s.record.recordName
+                        val refreshedResolved = runCatching {
+                            NoteBodyLoader.resolve(client, updated)
+                        }.getOrNull()
                         state = when {
                             sameDetail && current is ScreenState.Detail ->
                                 if (alsoExit) ScreenState.NotesList(current.session, patchedCache, current.folders, current.selectedFolder)
-                                else ScreenState.Detail(current.session, updated, patchedCache, current.folders, current.selectedFolder, pendingFolderRef = null)
+                                else ScreenState.Detail(
+                                    session = current.session,
+                                    record = updated,
+                                    notesCache = patchedCache,
+                                    folders = current.folders,
+                                    selectedFolder = current.selectedFolder,
+                                    pendingFolderRef = null,
+                                    resolvedBody = refreshedResolved,
+                                )
                             current is ScreenState.NotesList ->
                                 current.copy(notes = patchedCache)
                             else -> current
@@ -1038,6 +1074,7 @@ internal fun computeTitleAndSnippet(body: String): Pair<String, String> {
 @Composable
 private fun NoteDetailScreen(
     record: NoteRecord,
+    resolvedBody: ResolvedNoteBody? = null,
     onBack: () -> Unit,
     onSave: (newBody: String, isPureAppend: Boolean, alsoExit: Boolean, newSpans: List<NoteBodyEditor.AttrSpan>?) -> Unit,
     onDelete: () -> Unit,
@@ -1051,17 +1088,21 @@ private fun NoteDetailScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val shareContext = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
+    val readOnly = resolvedBody?.readOnly == true
     LaunchedEffect(savedHint) {
         if (savedHint != null) {
             snackbarHostState.showSnackbar(savedHint)
             onHintShown()
         }
     }
-    val originalBody = remember(record.recordName, record.recordChangeTag) {
-        record.stringField("TextDataEncrypted")?.let { b64 ->
-            runCatching { NoteBodyEditor.readVisibleTextFromBase64(b64) }.getOrNull()
-                ?: runCatching { NoteBodyEditor.readTextFromBase64(b64) }.getOrNull()
-        }.orEmpty()
+    val originalBody = remember(record.recordName, record.recordChangeTag, resolvedBody) {
+        when {
+            resolvedBody != null -> resolvedBody.visibleText
+            else -> record.stringField("TextDataEncrypted")?.let { b64 ->
+                runCatching { NoteBodyEditor.readVisibleTextFromBase64(b64) }.getOrNull()
+                    ?: runCatching { NoteBodyEditor.readTextFromBase64(b64) }.getOrNull()
+            }.orEmpty()
+        }
     }
     // Apple Notes stores the title as the first line of the body. We split the
     // raw originalBody into two editable pieces:
@@ -1070,18 +1111,22 @@ private fun NoteDetailScreen(
     // On save we re-assemble `titleDraft + "\n" + bodyDraft` (omitting the
     // separator if either piece is empty) so the underlying CloudKit body
     // shape stays identical to what Mac expects (first line == title).
-    val initialTitle = remember(originalBody) {
+    // When the body couldn't be decoded, fall back to TitleEncrypted so the
+    // app bar still shows the real note name (esp. TextDataAsset notes).
+    val initialTitle = remember(originalBody, resolvedBody) {
         val firstNl = originalBody.indexOf('\n')
-        if (firstNl < 0) originalBody else originalBody.substring(0, firstNl)
+        val fromBody = if (firstNl < 0) originalBody else originalBody.substring(0, firstNl)
+        fromBody.takeIf { it.isNotBlank() }
+            ?: resolvedBody?.titleFallback.orEmpty()
     }
     val initialBody = remember(originalBody) {
         val firstNl = originalBody.indexOf('\n')
         if (firstNl < 0) "" else originalBody.substring(firstNl + 1)
     }
-    var titleDraft by remember(record.recordName, record.recordChangeTag) {
+    var titleDraft by remember(record.recordName, record.recordChangeTag, resolvedBody) {
         mutableStateOf(initialTitle)
     }
-    var bodyDraft by remember(record.recordName, record.recordChangeTag) {
+    var bodyDraft by remember(record.recordName, record.recordChangeTag, resolvedBody) {
         mutableStateOf(androidx.compose.ui.text.input.TextFieldValue(initialBody))
     }
     val fullBodyForSave = when {
@@ -1094,16 +1139,21 @@ private fun NoteDetailScreen(
     val isPureAppend = remember(fullBodyForSave, originalBody) {
         fullBodyForSave.startsWith(originalBody) && fullBodyForSave.length > originalBody.length
     }
-    var isModified = fullBodyForSave != originalBody
+    // Read-only detail can populate the title bar from TitleEncrypted while
+    // visibleText is still empty — that must not look like a user edit.
+    var isModified = !readOnly && fullBodyForSave != originalBody
 
     // Parse the note's attribute_runs once per record load — kept around so
     // the splice path in NoteAppender can preserve paragraph styles through
     // edits (Phase D1). Display-time formatting via VisualTransformation is
     // a future enhancement; for now the editor shows plain text.
-    val attrSpans = remember(record.recordName, record.recordChangeTag) {
-        record.stringField("TextDataEncrypted")?.let { b64 ->
-            runCatching { NoteBodyEditor.parseAttributeRunsFromBase64(b64) }.getOrNull()
-        }.orEmpty()
+    val attrSpans = remember(record.recordName, record.recordChangeTag, resolvedBody) {
+        when {
+            resolvedBody != null -> resolvedBody.attrSpans
+            else -> record.stringField("TextDataEncrypted")?.let { b64 ->
+                runCatching { NoteBodyEditor.parseAttributeRunsFromBase64(b64) }.getOrNull()
+            }.orEmpty()
+        }
     }
     // attrSpans cover the FULL visible text including the title line (which
     // we render separately in the app bar). Trim the title's worth of spans
@@ -1125,8 +1175,10 @@ private fun NoteDetailScreen(
                 it.style != NoteBodyEditor.ParagraphStyle.TITLE
         }
     }
-    var viewMode by remember(record.recordName, record.recordChangeTag) {
-        mutableStateOf(hasRichFormatting && initialBody.isNotEmpty())
+    var viewMode by remember(record.recordName, record.recordChangeTag, readOnly) {
+        // Read-only notes always open in the formatted / non-edit view so we
+        // never present a blank "Start typing…" editor for asset-backed bodies.
+        mutableStateOf(readOnly || (hasRichFormatting && initialBody.isNotEmpty()))
     }
 
     // Mutable AttrSpan list driving the editor's formatting state. Covers the
@@ -1147,7 +1199,7 @@ private fun NoteDetailScreen(
         prevFullBody = fullBodyForSave
     }
     // Format-only changes need to mark the note as modified so save fires.
-    if (spansDraft != attrSpans) isModified = true
+    if (!readOnly && spansDraft != attrSpans) isModified = true
 
     // Live body-only spans for formatted view (mirrors any draft mutation).
     val bodyAttrSpans = remember(titleDraft, fullBodyForSave, spansDraft) {
@@ -1186,9 +1238,9 @@ private fun NoteDetailScreen(
     // `alsoExit=false` because we're not navigating, just persisting.
     // Use `rememberUpdatedState` semantics by referencing the latest values
     // through the captured composable scope.
-    DisposableEffect(lifecycleOwner, isModified, fullBodyForSave, isPureAppend) {
+    DisposableEffect(lifecycleOwner, isModified, fullBodyForSave, isPureAppend, readOnly) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_PAUSE && isModified && !saving) {
+            if (event == Lifecycle.Event.ON_PAUSE && isModified && !saving && !readOnly) {
                 onSave(fullBodyForSave, isPureAppend, false, spansDraft)
             }
         }
@@ -1245,32 +1297,44 @@ private fun NoteDetailScreen(
                     },
                     title = {
                         Column {
-                            // Editable title in the app bar — tap to type.
-                            BasicTextField(
-                                value = titleDraft,
-                                onValueChange = { titleDraft = it.replace("\n", "") },
-                                singleLine = true,
-                                textStyle = MaterialTheme.typography.titleLarge.copy(
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    fontWeight = FontWeight.Bold,
-                                ),
-                                cursorBrush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary),
-                                keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
-                                decorationBox = { inner ->
-                                    if (titleDraft.isEmpty()) {
-                                        Text(
-                                            "Untitled",
-                                            style = MaterialTheme.typography.titleLarge.copy(
-                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                                fontWeight = FontWeight.Bold,
-                                            ),
-                                        )
-                                    }
-                                    inner()
-                                },
-                                modifier = Modifier.fillMaxWidth(),
-                            )
+                            if (readOnly) {
+                                Text(
+                                    text = titleDraft.ifBlank { "Untitled" },
+                                    style = MaterialTheme.typography.titleLarge.copy(
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        fontWeight = FontWeight.Bold,
+                                    ),
+                                    maxLines = 2,
+                                )
+                            } else {
+                                // Editable title in the app bar — tap to type.
+                                BasicTextField(
+                                    value = titleDraft,
+                                    onValueChange = { titleDraft = it.replace("\n", "") },
+                                    singleLine = true,
+                                    textStyle = MaterialTheme.typography.titleLarge.copy(
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        fontWeight = FontWeight.Bold,
+                                    ),
+                                    cursorBrush = androidx.compose.ui.graphics.SolidColor(MaterialTheme.colorScheme.primary),
+                                    keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
+                                    decorationBox = { inner ->
+                                        if (titleDraft.isEmpty()) {
+                                            Text(
+                                                "Untitled",
+                                                style = MaterialTheme.typography.titleLarge.copy(
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                    fontWeight = FontWeight.Bold,
+                                                ),
+                                            )
+                                        }
+                                        inner()
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                )
+                            }
                             val pill = when {
+                                readOnly -> "Read only"
                                 saving -> "Saving…"
                                 isModified -> "Unsaved"
                                 savedAgoText != null -> savedAgoText
@@ -1287,7 +1351,7 @@ private fun NoteDetailScreen(
                         }
                     },
                     actions = {
-                        if (isModified) {
+                        if (isModified && !readOnly) {
                             IconButton(
                                 enabled = !saving,
                                 onClick = { onSave(fullBodyForSave, isPureAppend, false, spansDraft) },
@@ -1318,16 +1382,29 @@ private fun NoteDetailScreen(
                             Icon(Icons.Default.MoreVert, contentDescription = "More")
                         }
                         DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                            DropdownMenuItem(
-                                text = { Text("Delete note") },
-                                leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) },
-                                onClick = { menuOpen = false; showDeleteDialog = true },
-                            )
+                            if (!readOnly) {
+                                DropdownMenuItem(
+                                    text = { Text("Delete note") },
+                                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) },
+                                    onClick = { menuOpen = false; showDeleteDialog = true },
+                                )
+                            }
                         }
                     },
                 )
                 if (saving) {
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                }
+                resolvedBody?.statusMessage?.takeIf { readOnly }?.let { msg ->
+                    Text(
+                        text = msg,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.secondaryContainer)
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                    )
                 }
             }
         },
@@ -1338,27 +1415,48 @@ private fun NoteDetailScreen(
             // Body display: formatted view by default for notes that carry
             // paragraph styling (headings, lists, checkboxes), plain editor
             // otherwise. Tapping the formatted view drops into the editor.
-            if (viewMode) {
-                FormattedNoteBody(
-                    fullBody = bodyDraft.text,
-                    titlePrefixLength = 0,
-                    attrSpans = bodyAttrSpans,
-                    attachmentContent = attachmentCache.value,
-                    onTap = { viewMode = false },
-                    onToggleCheckbox = { bodyParaStart ->
-                        val skip = if (fullBodyForSave.contains('\n')) titleDraft.length + 1
-                            else titleDraft.length
-                        val fullPos = bodyParaStart + skip
-                        spansDraft = NoteBodyEditor.toggleCheckbox(
-                            fullBodyForSave, spansDraft, fullPos,
-                        )
-                        // Auto-save the toggle so check state persists.
-                        onSave(fullBodyForSave, false, false, spansDraft)
-                    },
-                    modifier = Modifier
-                        .weight(1f)
-                        .fillMaxWidth(),
-                )
+            // Read-only notes stay in the view path (never the blank editor).
+            if (viewMode || readOnly) {
+                val displayBody = bodyDraft.text.ifEmpty {
+                    val firstNl = originalBody.indexOf('\n')
+                    if (firstNl < 0) "" else originalBody.substring(firstNl + 1)
+                }
+                if (displayBody.isEmpty() && originalBody.isEmpty() &&
+                    !resolvedBody?.statusMessage.isNullOrBlank()
+                ) {
+                    Text(
+                        text = resolvedBody!!.statusMessage!!,
+                        style = MaterialTheme.typography.bodyLarge.copy(
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .padding(horizontal = 20.dp, vertical = 16.dp),
+                    )
+                } else {
+                    FormattedNoteBody(
+                        fullBody = displayBody,
+                        titlePrefixLength = 0,
+                        attrSpans = bodyAttrSpans,
+                        attachmentContent = attachmentCache.value,
+                        onTap = { if (!readOnly) viewMode = false },
+                        onToggleCheckbox = { bodyParaStart ->
+                            if (readOnly) return@FormattedNoteBody
+                            val skip = if (fullBodyForSave.contains('\n')) titleDraft.length + 1
+                                else titleDraft.length
+                            val fullPos = bodyParaStart + skip
+                            spansDraft = NoteBodyEditor.toggleCheckbox(
+                                fullBodyForSave, spansDraft, fullPos,
+                            )
+                            // Auto-save the toggle so check state persists.
+                            onSave(fullBodyForSave, false, false, spansDraft)
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                    )
+                }
             } else {
                 BasicTextField(
                     value = bodyDraft,

@@ -93,6 +93,76 @@ object MergeableDataDecoder {
         return extractTable(od)
     }
 
+    /**
+     * Best-effort plain-text extraction for modern note bodies stored as
+     * MergeableData (typical of large notes' `TextDataAsset` payloads).
+     *
+     * Walks the protobuf tree, collects UTF-8 length-delimited strings that
+     * look like human-readable note content, and returns the longest one.
+     * Observed Apple assets pack the full visible note (with `\n` separators)
+     * into a single string field — enough for a faithful read-only view.
+     */
+    fun decodeNotePlainText(protoOrCompressed: ByteArray): String? = runCatching {
+        val candidates = buildList {
+            add(protoOrCompressed)
+            runCatching { Gzip.decompress(protoOrCompressed) }.getOrNull()?.let { add(it) }
+        }
+        var best: String? = null
+        for (bytes in candidates) {
+            val strings = ArrayList<String>()
+            collectUtf8Strings(bytes, depth = 0, out = strings)
+            val picked = pickNoteBody(strings) ?: continue
+            if (best == null || picked.length > best.length) best = picked
+        }
+        best?.replace(' ', '\n')?.replace(' ', '\n')
+    }.onFailure {
+        Log.w(TAG, "decodeNotePlainText failed: ${it.message}")
+    }.getOrNull()
+
+    private fun collectUtf8Strings(bytes: ByteArray, depth: Int, out: MutableList<String>) {
+        if (depth > 8 || bytes.isEmpty()) return
+        val fields = runCatching { ProtobufWire.decode(bytes) }.getOrNull() ?: return
+        for (f in fields) {
+            if (f.wireType != ProtobufWire.WIRE_LENGTH_DELIM) continue
+            val payload = f.payload
+            val asText = runCatching { payload.decodeToString() }.getOrNull()
+            if (asText != null && looksLikeNoteText(asText)) {
+                out.add(asText)
+            } else if (payload.size > 4) {
+                collectUtf8Strings(payload, depth + 1, out)
+            }
+        }
+    }
+
+    private fun looksLikeNoteText(s: String): Boolean {
+        if (s.isEmpty() || s.length > 2_000_000) return false
+        if (s.startsWith("com.apple.")) return false
+        if (s.startsWith(".Apple")) return false
+        if (s.indexOf('\u0000') >= 0) return false
+        var printable = 0
+        for (ch in s) {
+            if (ch.isPrintableNoteChar()) printable++
+        }
+        return printable * 10 >= s.length * 9
+    }
+
+    private fun Char.isPrintableNoteChar(): Boolean =
+        this == '\n' || this == '\r' || this == '\t' || this.code in 0x20..0x10FFFF &&
+            !Character.isISOControl(this)
+
+    private fun pickNoteBody(strings: List<String>): String? {
+        if (strings.isEmpty()) return null
+        // Prefer the longest string that isn't merely a URL / short token.
+        return strings
+            .asSequence()
+            .filter { it.length >= 2 }
+            .filterNot { s ->
+                val isUrl = s.startsWith("http://") || s.startsWith("https://")
+                isUrl && !s.contains('\n') && s.length < 200
+            }
+            .maxByOrNull { it.length }
+    }
+
     private data class ObjectData(
         val objects: List<List<ProtobufWire.Field>>,
         val keys: List<String>,

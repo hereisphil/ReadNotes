@@ -10,8 +10,11 @@ import com.example.applenotes.auth.DeviceIdentity
 import com.example.applenotes.auth.ICloudSession
 import com.example.applenotes.client.AppleNotesClient
 import com.example.applenotes.client.NoteSummary
+import com.example.applenotes.client.extractAssetDownloadUrl
+import com.example.applenotes.client.extractAssetSize
 import com.example.applenotes.proto.NoteAppender
 import com.example.applenotes.proto.NoteBodyEditor
+import com.example.applenotes.proto.NoteBodyLoader
 import com.example.applenotes.ui.computeTitleAndSnippet
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
@@ -174,6 +177,47 @@ class DebugReceiver : BroadcastReceiver() {
                             Log.i(TAG, "FIELD_B64 $name [$i/$chunks] ${s.substring(start, end)}")
                         }
                     }
+                }
+            }
+            ACTION_DUMP_TEXT_ASSET -> {
+                val recordName = intent.getStringExtra("recordName")
+                if (recordName == null) {
+                    Log.e(TAG, "DUMP_TEXT_ASSET missing recordName")
+                    return
+                }
+                val appContext = context.applicationContext
+                launchOp("DUMP_TEXT_ASSET") { client, _ ->
+                    val record = client.lookupNote(recordName)
+                    val asset = record.rawFields["TextDataAsset"]
+                    val url = asset?.let { extractAssetDownloadUrl(it) }
+                    val size = asset?.let { extractAssetSize(it) }
+                    Log.i(TAG, "DUMP_TEXT_ASSET rec=$recordName size=$size url=${url?.take(120)}")
+                    if (url == null) {
+                        Log.w(TAG, "DUMP_TEXT_ASSET_NO_URL")
+                        return@launchOp
+                    }
+                    val bytes = client.fetchAssetBytes(url)
+                    if (bytes == null) {
+                        Log.e(TAG, "DUMP_TEXT_ASSET_DOWNLOAD_FAILED")
+                        return@launchOp
+                    }
+                    val out = java.io.File(appContext.cacheDir, "textdata-asset.bin")
+                    out.writeBytes(bytes)
+                    Log.i(
+                        TAG,
+                        "DUMP_TEXT_ASSET_OK bytes=${bytes.size} magic=" +
+                            bytes.take(8).joinToString("") {
+                                ((it.toInt() and 0xFF) + 0x100).toString(16).substring(1)
+                            } + " path=${out.absolutePath}",
+                    )
+                    val resolved = NoteBodyLoader.resolve(client, record)
+                    Log.i(
+                        TAG,
+                        "DUMP_TEXT_ASSET_RESOLVED source=${resolved.source} readOnly=${resolved.readOnly} " +
+                            "kind=${resolved.protoKind} chars=${resolved.visibleText.length} " +
+                            "title='${resolved.displayTitle.take(40)}' " +
+                            "status='${resolved.statusMessage}'",
+                    )
                 }
             }
             ACTION_DUMP_BY_TITLE -> {
@@ -346,6 +390,7 @@ class DebugReceiver : BroadcastReceiver() {
         private const val ACTION_DELETE_BY_TITLE = "com.example.applenotes.DELETE_BY_TITLE"
         private const val ACTION_DUMP_BY_TITLE = "com.example.applenotes.DUMP_BY_TITLE"
         private const val ACTION_DUMP_RECORD = "com.example.applenotes.DUMP_RECORD"
+        private const val ACTION_DUMP_TEXT_ASSET = "com.example.applenotes.DUMP_TEXT_ASSET"
         private const val ACTION_CREATE = "com.example.applenotes.CREATE"
 
         private val httpClient by lazy {

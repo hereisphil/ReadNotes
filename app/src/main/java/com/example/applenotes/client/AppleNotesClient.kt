@@ -62,6 +62,7 @@ data class NoteRecord(
 ) {
     fun stringField(name: String): String? = rawFields[name]?.let { extractStringValue(it) }
     fun decodedTitle(): String? = rawFields["TitleEncrypted"]?.let { decodeEncryptedString(it) }
+    fun assetDownloadUrl(name: String): String? = rawFields[name]?.let { extractAssetDownloadUrl(it) }
 }
 
 /**
@@ -686,7 +687,20 @@ internal fun extractStringValue(field: JsonElement): String? {
 internal fun extractAssetDownloadUrl(field: JsonElement): String? {
     val obj = field as? JsonObject ?: return null
     val value = obj["value"] as? JsonObject ?: return null
-    return runCatching { value["downloadURL"]?.jsonPrimitive?.content }.getOrNull()
+    val url = runCatching { value["downloadURL"]?.jsonPrimitive?.content }.getOrNull() ?: return null
+    // CloudKit often emits `${f}` placeholders that must be replaced with the
+    // asset's fileChecksum before the signed CDN URL will resolve.
+    if (!url.contains("\${f}")) return url
+    val checksum = runCatching { value["fileChecksum"]?.jsonPrimitive?.content }.getOrNull()
+        ?: return url
+    return url.replace("\${f}", checksum)
+}
+
+/** Pull `value.size` from a CKAsset field when present. */
+internal fun extractAssetSize(field: JsonElement): Long? {
+    val obj = field as? JsonObject ?: return null
+    val value = obj["value"] as? JsonObject ?: return null
+    return runCatching { value["size"]?.jsonPrimitive?.content?.toLong() }.getOrNull()
 }
 
 /**
