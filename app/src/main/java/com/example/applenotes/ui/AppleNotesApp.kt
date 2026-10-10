@@ -35,11 +35,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.automirrored.filled.Note
-import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
@@ -75,7 +73,6 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -140,6 +137,8 @@ import com.example.applenotes.proto.NoteBodyLoader
 import com.example.applenotes.proto.ResolvedNoteBody
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 private const val TAG = "AppleNotesUi"
@@ -213,7 +212,35 @@ fun AppleNotesApp() {
     var ourReplicaUuid by remember { mutableStateOf<ByteArray?>(null) }
     var lastSavedHint by remember { mutableStateOf<String?>(null) }
     var lastSavedAtMs by remember { mutableStateOf<Long?>(null) }
+    // Full-text search index: recordName -> visible note body. Built in the
+    // background after the list loads so search can match inside note content,
+    // not just CloudKit's short title/snippet fields.
+    var bodyIndex by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    var bodyIndexJob by remember { mutableStateOf<Job?>(null) }
     val scope = rememberCoroutineScope()
+
+    fun kickBodyIndex(session: ICloudSession, notes: List<NoteSummary>) {
+        val liveIds = notes.mapTo(HashSet()) { it.recordName }
+        if (bodyIndex.keys.any { it !in liveIds }) {
+            bodyIndex = bodyIndex.filterKeys { it in liveIds }
+        }
+        val missing = notes.filter { it.recordName !in bodyIndex }
+        if (missing.isEmpty()) return
+        if (bodyIndexJob?.isActive == true) return
+        bodyIndexJob = scope.launch {
+            val client = AppleNotesClient(httpClient, session)
+            for (note in missing) {
+                if (!isActive) break
+                try {
+                    val rec = client.lookupNote(note.recordName)
+                    val resolved = NoteBodyLoader.resolve(client, rec)
+                    bodyIndex = bodyIndex + (note.recordName to resolved.visibleText)
+                } catch (e: Throwable) {
+                    Log.w(TAG, "body index failed for ${note.recordName}: ${e.message}")
+                }
+            }
+        }
+    }
 
     // First-launch alpha disclaimer. Block all app behaviour behind this — we
     // don't even start the auth bootstrap until the user has acknowledged.
@@ -310,110 +337,67 @@ fun AppleNotesApp() {
                 state = ScreenState.Login
             },
         )
-        is ScreenState.NotesList -> NotesListScreen(
-            allNotes = s.notes,
-            folders = s.folders,
-            selectedFolder = s.selectedFolder,
-            onSelectFolder = { folderRn ->
-                state = s.copy(selectedFolder = folderRn)
-            },
-            onSelect = { note ->
-                scope.launch {
-                    state = ScreenState.Loading("Loading note…")
-                    state = try {
-                        val client = AppleNotesClient(httpClient, s.session)
-                        val rec = client.lookupNote(note.recordName)
-                        val resolved = NoteBodyLoader.resolve(client, rec)
-                        ScreenState.Detail(
-                            session = s.session,
-                            record = rec,
-                            notesCache = s.notes,
-                            folders = s.folders,
-                            selectedFolder = s.selectedFolder,
-                            resolvedBody = resolved,
-                        )
-                    } catch (e: Throwable) {
-                        ScreenState.Error(e.message ?: e.toString())
+        is ScreenState.NotesList -> {
+            LaunchedEffect(s.session, s.notes.map { it.recordName }) {
+                kickBodyIndex(s.session, s.notes)
+            }
+            NotesListScreen(
+                allNotes = s.notes,
+                folders = s.folders,
+                selectedFolder = s.selectedFolder,
+                bodyIndex = bodyIndex,
+                onSelectFolder = { folderRn ->
+                    state = s.copy(selectedFolder = folderRn)
+                },
+                onSelect = { note ->
+                    scope.launch {
+                        state = ScreenState.Loading("Loading note…")
+                        state = try {
+                            val client = AppleNotesClient(httpClient, s.session)
+                            val rec = client.lookupNote(note.recordName)
+                            val resolved = NoteBodyLoader.resolve(client, rec)
+                            bodyIndex = bodyIndex + (rec.recordName to resolved.visibleText)
+                            ScreenState.Detail(
+                                session = s.session,
+                                record = rec,
+                                notesCache = s.notes,
+                                folders = s.folders,
+                                selectedFolder = s.selectedFolder,
+                                resolvedBody = resolved,
+                            )
+                        } catch (e: Throwable) {
+                            ScreenState.Error(e.message ?: e.toString())
+                        }
                     }
-                }
-            },
-            onRefresh = {
-                scope.launch {
-                    state = ScreenState.Loading("Refreshing…")
-                    state = try {
-                        val client = AppleNotesClient(httpClient, s.session)
-                        val notes = client.fetchRecents(limit = 1000)
-                            .filter { !it.deleted }
-                            .sortedByDescending { it.modificationTimestampMs ?: 0L }
-                        val folderIds = notes.mapNotNull { it.folderRecordName }.toSet()
-                        val folders = runCatching { client.lookupFolders(folderIds) }.getOrElse { s.folders }
-                        ScreenState.NotesList(s.session, notes, folders, s.selectedFolder)
-                    } catch (e: Throwable) {
-                        ScreenState.Error(e.message ?: e.toString())
+                },
+                onRefresh = {
+                    scope.launch {
+                        state = ScreenState.Loading("Refreshing…")
+                        state = try {
+                            val client = AppleNotesClient(httpClient, s.session)
+                            val notes = client.fetchRecents(limit = 1000)
+                                .filter { !it.deleted }
+                                .sortedByDescending { it.modificationTimestampMs ?: 0L }
+                            val folderIds = notes.mapNotNull { it.folderRecordName }.toSet()
+                            val folders = runCatching { client.lookupFolders(folderIds) }.getOrElse { s.folders }
+                            // Allow a fresh index pass for any notes not yet cached.
+                            bodyIndexJob?.cancel()
+                            bodyIndexJob = null
+                            ScreenState.NotesList(s.session, notes, folders, s.selectedFolder)
+                        } catch (e: Throwable) {
+                            ScreenState.Error(e.message ?: e.toString())
+                        }
                     }
-                }
-            },
-            onCreateNote = {
-                scope.launch {
-                    val uuid = ourReplicaUuid
-                    if (uuid == null) {
-                        state = ScreenState.Error("Device replica UUID not loaded yet — try again in a moment.")
-                        return@launch
-                    }
-                    state = ScreenState.Loading("Creating note…")
-                    state = try {
-                        val client = AppleNotesClient(httpClient, s.session)
-                        // Grab a Folder CKReference from any existing note in
-                        // the user-visible set. We need this BEFORE the user
-                        // types anything because createNote requires a folder
-                        // ref. Prefer the currently-selected folder so the
-                        // new note lands where the user is browsing.
-                        val sample = s.notes
-                            .firstOrNull { it.folderRecordName == s.selectedFolder }
-                            ?: s.notes.firstOrNull { it.folderRecordName != TRASH_RECORD_NAME }
-                            ?: error("No existing note to copy folder reference from")
-                        val sampleRecord = client.lookupNote(sample.recordName)
-                        val folderRef = sampleRecord.rawFields["Folder"]
-                            ?: error("Sample note has no Folder field")
-                        // DEFERRED CREATE: do NOT call createNote yet. iCloud.com
-                        // doesn't either — clicking "new note" just opens an
-                        // empty editor; the server-side record only gets
-                        // created on the first save with the user's actual
-                        // content. Empty-create-then-modify races Mac's
-                        // notesync housekeeping and produces records that
-                        // Mac later trashes (we observed this: notes appearing
-                        // briefly then vanishing on Mac restart).
-                        //
-                        // The draft gets a unique local recordName ("draft-<uuid>")
-                        // so the post-save state-update can disambiguate
-                        // multiple drafts in flight (back, FAB-again, type,
-                        // save races back into the original Detail).
-                        val draftId = "draft-" + java.util.UUID.randomUUID().toString()
-                        val draftRecord = NoteRecord(
-                            recordName = draftId,
-                            recordType = "Note",
-                            recordChangeTag = null,
-                            rawFields = emptyMap(),
-                        )
-                        ScreenState.Detail(
-                            session = s.session,
-                            record = draftRecord,
-                            notesCache = s.notes,
-                            folders = s.folders,
-                            selectedFolder = s.selectedFolder,
-                            pendingFolderRef = folderRef,
-                        )
-                    } catch (e: Throwable) {
-                        Log.e(TAG, "createNote (folder lookup) failed", e)
-                        ScreenState.Error(e.message ?: e.toString())
-                    }
-                }
-            },
-            onSignOut = {
-                cookieReader.clearAuthCookies()
-                state = ScreenState.Login
-            },
-        )
+                },
+                onSignOut = {
+                    cookieReader.clearAuthCookies()
+                    bodyIndex = emptyMap()
+                    bodyIndexJob?.cancel()
+                    bodyIndexJob = null
+                    state = ScreenState.Login
+                },
+            )
+        }
         is ScreenState.Detail -> NoteDetailScreen(
             record = s.record,
             resolvedBody = s.resolvedBody,
@@ -592,31 +576,6 @@ fun AppleNotesApp() {
                     }
                 }
             },
-            onDelete = {
-                scope.launch {
-                    // Draft (never saved to iCloud): just discard locally,
-                    // no network call needed.
-                    if (s.record.recordChangeTag == null) {
-                        state = ScreenState.NotesList(s.session, s.notesCache, s.folders, s.selectedFolder)
-                        return@launch
-                    }
-                    state = ScreenState.Loading("Deleting…")
-                    state = try {
-                        val tag = s.record.recordChangeTag!!
-                        AppleNotesClient(httpClient, s.session).deleteNote(s.record.recordName, tag)
-                        // Drop the deleted note from the cache and return to list.
-                        ScreenState.NotesList(
-                            s.session,
-                            s.notesCache.filter { it.recordName != s.record.recordName },
-                            s.folders,
-                            s.selectedFolder,
-                        )
-                    } catch (e: Throwable) {
-                        Log.e(TAG, "delete failed", e)
-                        ScreenState.Error(e.message ?: e.toString())
-                    }
-                }
-            },
         )
     }
 }
@@ -694,10 +653,10 @@ private fun NotesListScreen(
     allNotes: List<NoteSummary>,
     folders: List<FolderSummary>,
     selectedFolder: String?,
+    bodyIndex: Map<String, String>,
     onSelectFolder: (String?) -> Unit,
     onSelect: (NoteSummary) -> Unit,
     onRefresh: () -> Unit,
-    onCreateNote: () -> Unit,
     onSignOut: () -> Unit,
 ) {
     var query by remember { mutableStateOf("") }
@@ -709,13 +668,18 @@ private fun NotesListScreen(
             else -> allNotes.filter { it.folderRecordName == selectedFolder }
         }
     }
-    val filtered = remember(notesInFolder, query) {
+    val filtered = remember(notesInFolder, query, bodyIndex) {
         if (query.isBlank()) notesInFolder
-        else notesInFolder.filter {
-            (it.title?.contains(query, ignoreCase = true) == true) ||
-                (it.snippet?.contains(query, ignoreCase = true) == true)
+        else notesInFolder.filter { note ->
+            val q = query
+            (note.title?.contains(q, ignoreCase = true) == true) ||
+                (note.snippet?.contains(q, ignoreCase = true) == true) ||
+                (bodyIndex[note.recordName]?.contains(q, ignoreCase = true) == true)
         }
     }
+    val indexedCount = bodyIndex.size
+    val indexTotal = allNotes.size
+    val indexing = indexedCount < indexTotal
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val drawerScope = rememberCoroutineScope()
     // System back closes the drawer if it's open; otherwise let it fall
@@ -780,18 +744,9 @@ private fun NotesListScreen(
                 scrollBehavior = scrollBehavior,
             )
         },
-        floatingActionButton = {
-            FloatingActionButton(
-                onClick = onCreateNote,
-                containerColor = MaterialTheme.colorScheme.primary,
-                contentColor = MaterialTheme.colorScheme.onPrimary,
-            ) {
-                Icon(Icons.Default.Add, contentDescription = "New note")
-            }
-        },
     ) { padding ->
         Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-            // Search bar
+            // Search bar — matches title, snippet, and full indexed body text.
             OutlinedTextField(
                 value = query,
                 onValueChange = { query = it },
@@ -814,8 +769,29 @@ private fun NotesListScreen(
                 ),
                 shape = MaterialTheme.shapes.large,
             )
+            if (indexing) {
+                Text(
+                    text = "Indexing note contents for search… $indexedCount/$indexTotal",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 2.dp),
+                )
+            }
             if (filtered.isEmpty()) {
-                EmptyNotesState(query.isNotBlank())
+                if (query.isNotBlank() && indexing) {
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            "Still indexing — try again in a moment.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                } else {
+                    EmptyNotesState(query.isNotBlank())
+                }
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
@@ -825,7 +801,7 @@ private fun NotesListScreen(
                     items(filtered, key = { it.recordName }) { note ->
                         NoteCard(note, onClick = { onSelect(note) })
                     }
-                    item { Spacer(Modifier.height(80.dp)) } // FAB clearance
+                    item { Spacer(Modifier.height(24.dp)) }
                 }
             }
         }
@@ -1077,7 +1053,6 @@ private fun NoteDetailScreen(
     resolvedBody: ResolvedNoteBody? = null,
     onBack: () -> Unit,
     onSave: (newBody: String, isPureAppend: Boolean, alsoExit: Boolean, newSpans: List<NoteBodyEditor.AttrSpan>?) -> Unit,
-    onDelete: () -> Unit,
     saving: Boolean,
     savedHint: String? = null,
     lastSavedAtMs: Long? = null,
@@ -1229,9 +1204,6 @@ private fun NoteDetailScreen(
         }
     }
 
-    var showDeleteDialog by remember { mutableStateOf(false) }
-    var menuOpen by remember { mutableStateOf(false) }
-
     // Auto-save on lifecycle ON_PAUSE (app backgrounded, screen turns off,
     // another activity covers us, etc.). Best-effort fire-and-forget — the
     // parent's onSave coroutine handles the actual network call. We pass
@@ -1378,18 +1350,6 @@ private fun NoteDetailScreen(
                         ) {
                             Icon(Icons.Default.Share, contentDescription = "Share")
                         }
-                        IconButton(onClick = { menuOpen = true }) {
-                            Icon(Icons.Default.MoreVert, contentDescription = "More")
-                        }
-                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                            if (!readOnly) {
-                                DropdownMenuItem(
-                                    text = { Text("Delete note") },
-                                    leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) },
-                                    onClick = { menuOpen = false; showDeleteDialog = true },
-                                )
-                            }
-                        }
                     },
                 )
                 if (saving) {
@@ -1520,21 +1480,6 @@ private fun NoteDetailScreen(
         }
     }
 
-    if (showDeleteDialog) {
-        AlertDialog(
-            onDismissRequest = { showDeleteDialog = false },
-            title = { Text("Delete this note?") },
-            text = { Text("This moves the note to Recently Deleted in iCloud Notes.") },
-            confirmButton = {
-                TextButton(onClick = { showDeleteDialog = false; onDelete() }) {
-                    Text("Delete")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showDeleteDialog = false }) { Text("Cancel") }
-            },
-        )
-    }
 }
 
 /**
