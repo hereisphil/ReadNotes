@@ -5,10 +5,10 @@ plugins {
 }
 
 android {
-    namespace = "com.example.applenotes"
+    namespace = "com.readnotes"
     compileSdk = 36
     defaultConfig {
-        applicationId = "com.example.applenotes"
+        applicationId = "com.readnotes"
         minSdk = 26
         targetSdk = 36
         versionCode = 2

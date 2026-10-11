@@ -90,12 +90,12 @@ Write paths from the upstream codebase may still exist under `proto/` and
 ## Code tour
 
 ```
-app/src/main/java/com/example/applenotes/
+app/src/main/java/com/readnotes/
 ├── MainActivity.kt            Edge-to-edge shell, theme, splash
 ├── AlphaWarning.kt            First-launch disclaimer (DataStore)
 ├── SearchBodyIndexStore.kt    On-disk cache for full-text search bodies
 ├── auth/                      WebView cookie harvest, session, device identity
-├── client/AppleNotesClient.kt CloudKit HTTP: recents, lookup, folders, assets
+├── client/NotesClient.kt      CloudKit HTTP: recents, lookup, folders, assets
 ├── proto/
 │   ├── NoteBodyLoader.kt      Resolve note body + attachments for display
 │   ├── NoteBodyEditor.kt      Decode topotext → visible text + attribute runs
@@ -104,18 +104,18 @@ app/src/main/java/com/example/applenotes/
 │   └── Gzip.kt                gzip / zlib helpers
 ├── theme/                     Colors, typography, theme prefs
 ├── debug/DebugReceiver.kt     Optional adb broadcast helpers
-└── ui/AppleNotesApp.kt        Compose UI: list, search, detail, drawer
+└── ui/ReadNotesApp.kt         Compose UI: list, search, detail, drawer
 ```
 
-Useful starting points: `AppleNotesClient.kt` (wire calls), `NoteBodyLoader.kt`
-(how a note becomes UI), `AppleNotesApp.kt` (screens and search index).
+Useful starting points: `NotesClient.kt` (wire calls), `NoteBodyLoader.kt`
+(how a note becomes UI), `ReadNotesApp.kt` (screens and search index).
 
 ## Build / run
 
 ```bash
 ./gradlew :app:assembleDebug
 adb install -r app/build/outputs/apk/debug/app-debug.apk
-adb shell am start -n com.example.applenotes/.MainActivity
+adb shell am start -n com.readnotes/.MainActivity
 ```
 
 You need an Android emulator or device. Sign in with an Apple ID that has Notes

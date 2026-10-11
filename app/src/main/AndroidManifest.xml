@@ -29,18 +29,18 @@
             android:name=".debug.DebugReceiver"
             android:exported="true">
             <intent-filter>
-                <action android:name="com.example.applenotes.LIST" />
-                <action android:name="com.example.applenotes.LOOKUP" />
-                <action android:name="com.example.applenotes.LOOKUP_BY_TITLE" />
-                <action android:name="com.example.applenotes.APPEND" />
-                <action android:name="com.example.applenotes.APPEND_BY_TITLE" />
-                <action android:name="com.example.applenotes.SET_BODY_BY_TITLE" />
-                <action android:name="com.example.applenotes.DELETE_BY_TITLE" />
-                <action android:name="com.example.applenotes.DUMP_BY_TITLE" />
-                <action android:name="com.example.applenotes.DUMP_RECORD" />
-                <action android:name="com.example.applenotes.DUMP_TEXT_ASSET" />
-                <action android:name="com.example.applenotes.CREATE" />
-                <action android:name="com.example.applenotes.PROBE_PINNED" />
+                <action android:name="com.readnotes.LIST" />
+                <action android:name="com.readnotes.LOOKUP" />
+                <action android:name="com.readnotes.LOOKUP_BY_TITLE" />
+                <action android:name="com.readnotes.APPEND" />
+                <action android:name="com.readnotes.APPEND_BY_TITLE" />
+                <action android:name="com.readnotes.SET_BODY_BY_TITLE" />
+                <action android:name="com.readnotes.DELETE_BY_TITLE" />
+                <action android:name="com.readnotes.DUMP_BY_TITLE" />
+                <action android:name="com.readnotes.DUMP_RECORD" />
+                <action android:name="com.readnotes.DUMP_TEXT_ASSET" />
+                <action android:name="com.readnotes.CREATE" />
+                <action android:name="com.readnotes.PROBE_PINNED" />
             </intent-filter>
         </receiver>
     </application>
