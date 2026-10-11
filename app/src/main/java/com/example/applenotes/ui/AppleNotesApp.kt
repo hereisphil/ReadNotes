@@ -136,6 +136,7 @@ import com.example.applenotes.client.FolderSummary
 import com.example.applenotes.client.NoteRecord
 import com.example.applenotes.client.NoteSummary
 import com.example.applenotes.R
+import com.example.applenotes.SearchBodyIndexStore
 import com.example.applenotes.proto.NoteBodyEditor
 import com.example.applenotes.proto.NoteBodyLoader
 import com.example.applenotes.proto.ResolvedNoteBody
@@ -221,45 +222,98 @@ fun AppleNotesApp(
     }
 
     var state by remember { mutableStateOf<ScreenState>(ScreenState.Splash) }
-    // Full-text search index: recordName -> visible note body. Built in the
+    // Full-text search index: recordName -> body + mod time. Built in the
     // background after the list loads so search can match inside note content,
-    // not just CloudKit's short title/snippet fields.
-    var bodyIndex by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
+    // not just CloudKit's short title/snippet fields. Hydrated from disk so a
+    // process kill (common when switching apps) doesn't force a full re-download.
+    var bodyIndex by remember {
+        mutableStateOf<Map<String, SearchBodyIndexStore.CachedBody>>(emptyMap())
+    }
     var bodyIndexJob by remember { mutableStateOf<Job?>(null) }
+    var bodyIndexHydrated by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
 
+    fun noteModMs(note: NoteSummary): Long = note.modificationTimestampMs ?: 0L
+
     fun kickBodyIndex(session: ICloudSession, notes: List<NoteSummary>) {
-        val liveIds = notes.mapTo(HashSet()) { it.recordName }
-        if (bodyIndex.keys.any { it !in liveIds }) {
-            bodyIndex = bodyIndex.filterKeys { it in liveIds }
-        }
-        // Locked notes have no searchable body here — mark them indexed empty
-        // so we don't hammer CloudKit / trip the protobuf walker on ciphertext.
-        val lockedMissing = notes.filter { it.locked && it.recordName !in bodyIndex }
-        if (lockedMissing.isNotEmpty()) {
-            bodyIndex = bodyIndex + lockedMissing.associate { it.recordName to "" }
-        }
-        val missing = notes.filter { !it.locked && it.recordName !in bodyIndex }
-        if (missing.isEmpty()) return
-        if (bodyIndexJob?.isActive == true) return
+        // Restart if the note set changed mid-pass so new/updated ids aren't skipped.
+        bodyIndexJob?.cancel()
         bodyIndexJob = scope.launch {
+            // Restore disk cache once per process so we only fetch new/changed notes.
+            if (!bodyIndexHydrated) {
+                val disk = SearchBodyIndexStore.load(context)
+                if (disk.isNotEmpty()) {
+                    bodyIndex = disk
+                }
+                bodyIndexHydrated = true
+            }
+
+            fun fresh(
+                note: NoteSummary,
+                map: Map<String, SearchBodyIndexStore.CachedBody>,
+            ): Boolean = map[note.recordName]?.modMs == noteModMs(note)
+
+            val liveIds = notes.mapTo(HashSet()) { it.recordName }
+            var index = bodyIndex
+            if (index.keys.any { it !in liveIds }) {
+                index = index.filterKeys { it in liveIds }
+                bodyIndex = index
+            }
+
+            // Locked notes have no searchable body here — mark them indexed empty
+            // so we don't hammer CloudKit / trip the protobuf walker on ciphertext.
+            val lockedMissing = notes.filter { it.locked && !fresh(it, index) }
+            if (lockedMissing.isNotEmpty()) {
+                index = index + lockedMissing.associate {
+                    it.recordName to SearchBodyIndexStore.CachedBody(noteModMs(it), "")
+                }
+                bodyIndex = index
+            }
+
+            val missing = notes.filter { !it.locked && !fresh(it, index) }
+            if (missing.isEmpty()) {
+                SearchBodyIndexStore.save(context, index)
+                return@launch
+            }
+
             val client = AppleNotesClient(httpClient, session)
+            var sinceFlush = 0
             for (note in missing) {
                 if (!isActive) break
+                val modMs = noteModMs(note)
                 try {
                     val rec = client.lookupNote(note.recordName)
-                    if (rec.isPasswordLocked()) {
-                        bodyIndex = bodyIndex + (note.recordName to "")
-                        continue
+                    val text = if (rec.isPasswordLocked()) {
+                        ""
+                    } else {
+                        NoteBodyLoader.resolve(client, rec).visibleText
                     }
-                    val resolved = NoteBodyLoader.resolve(client, rec)
-                    bodyIndex = bodyIndex + (note.recordName to resolved.visibleText)
+                    index = index + (note.recordName to SearchBodyIndexStore.CachedBody(modMs, text))
+                    bodyIndex = index
                 } catch (e: Throwable) {
                     Log.w(TAG, "body index failed for ${note.recordName}: ${e.message}")
                     // Avoid retrying the same broken record forever this session.
-                    bodyIndex = bodyIndex + (note.recordName to "")
+                    index = index + (note.recordName to SearchBodyIndexStore.CachedBody(modMs, ""))
+                    bodyIndex = index
+                }
+                sinceFlush++
+                if (sinceFlush >= 5) {
+                    SearchBodyIndexStore.save(context, index)
+                    sinceFlush = 0
                 }
             }
+            if (isActive) {
+                SearchBodyIndexStore.save(context, index)
+            }
+        }
+    }
+
+    // Pull the search cache off disk ASAP so a killed-and-restored process
+    // doesn't flash "Indexing 0/N" while the note list is already on screen.
+    LaunchedEffect(Unit) {
+        if (!bodyIndexHydrated) {
+            bodyIndex = SearchBodyIndexStore.load(context)
+            bodyIndexHydrated = true
         }
     }
 
@@ -362,6 +416,7 @@ fun AppleNotesApp(
                 folders = s.folders,
                 selectedFolder = s.selectedFolder,
                 bodyIndex = bodyIndex,
+                bodyIndexReady = bodyIndexHydrated,
                 themeMode = themeMode,
                 onThemeModeChange = onThemeModeChange,
                 onSelectFolder = { folderRn ->
@@ -380,7 +435,17 @@ fun AppleNotesApp(
                                 listSnapshot
                             } else {
                                 val resolved = NoteBodyLoader.resolve(client, rec)
-                                bodyIndex = bodyIndex + (rec.recordName to resolved.visibleText)
+                                val modMs = note.modificationTimestampMs ?: 0L
+                                val updatedIndex = bodyIndex + (
+                                    rec.recordName to SearchBodyIndexStore.CachedBody(
+                                        modMs = modMs,
+                                        text = resolved.visibleText,
+                                    )
+                                )
+                                bodyIndex = updatedIndex
+                                scope.launch {
+                                    SearchBodyIndexStore.save(context, updatedIndex)
+                                }
                                 ScreenState.Detail(
                                     session = listSnapshot.session,
                                     record = rec,
@@ -425,8 +490,10 @@ fun AppleNotesApp(
                 onSignOut = {
                     cookieReader.clearAuthCookies()
                     bodyIndex = emptyMap()
+                    bodyIndexHydrated = false
                     bodyIndexJob?.cancel()
                     bodyIndexJob = null
+                    scope.launch { SearchBodyIndexStore.clear(context) }
                     state = ScreenState.Login
                 },
             )
@@ -548,7 +615,8 @@ private fun NotesListScreen(
     allNotes: List<NoteSummary>,
     folders: List<FolderSummary>,
     selectedFolder: String?,
-    bodyIndex: Map<String, String>,
+    bodyIndex: Map<String, SearchBodyIndexStore.CachedBody>,
+    bodyIndexReady: Boolean,
     themeMode: ThemeMode,
     onThemeModeChange: (ThemeMode) -> Unit,
     onSelectFolder: (String?) -> Unit,
@@ -571,12 +639,19 @@ private fun NotesListScreen(
             val q = query
             (note.title?.contains(q, ignoreCase = true) == true) ||
                 (note.snippet?.contains(q, ignoreCase = true) == true) ||
-                (bodyIndex[note.recordName]?.contains(q, ignoreCase = true) == true)
+                (bodyIndex[note.recordName]?.text?.contains(q, ignoreCase = true) == true)
         }
     }
-    val indexedCount = bodyIndex.size
+    // Count only entries whose mod time still matches — stale disk rows don't
+    // count as done (they'll be re-fetched in the background).
+    val indexedCount = allNotes.count { note ->
+        val cached = bodyIndex[note.recordName] ?: return@count false
+        cached.modMs == (note.modificationTimestampMs ?: 0L)
+    }
     val indexTotal = allNotes.size
-    val indexing = indexedCount < indexTotal
+    // Hide the banner until the disk cache has been read — otherwise a warm
+    // start briefly looks like a full reindex (0/N) before cache lands.
+    val indexing = bodyIndexReady && indexedCount < indexTotal
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val drawerScope = rememberCoroutineScope()
     var lockedNoteTitle by remember { mutableStateOf<String?>(null) }
