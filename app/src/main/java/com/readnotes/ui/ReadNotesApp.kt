@@ -14,6 +14,9 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -41,6 +44,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.automirrored.filled.Note
+import androidx.compose.material.icons.filled.Notes
 import androidx.compose.material.icons.filled.BrightnessAuto
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
@@ -53,6 +57,7 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Share
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.material.icons.filled.CheckBox
 import androidx.compose.material.icons.filled.CheckBoxOutlineBlank
 import androidx.compose.material.icons.filled.FormatBold
@@ -61,7 +66,6 @@ import androidx.compose.material.icons.filled.FormatStrikethrough
 import androidx.compose.material.icons.filled.FormatUnderlined
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.HorizontalRule
-import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Link
 import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
 import androidx.compose.material.icons.filled.FormatListNumbered
@@ -160,6 +164,8 @@ private const val ICLOUD_NOTES_URL = "https://www.icloud.com/notes"
 
 private sealed interface ScreenState {
     data object Splash : ScreenState
+    /** Signed-out landing (first launch or after sign-out). */
+    data object Welcome : ScreenState
     data object Login : ScreenState
     data class Loading(val msg: String) : ScreenState
     data class Error(
@@ -324,27 +330,6 @@ fun ReadNotesApp(
         }
     }
 
-    // First-launch alpha disclaimer. Block all app behaviour behind this — we
-    // don't even start the auth bootstrap until the user has acknowledged.
-    var alphaAck by remember { mutableStateOf<Boolean?>(null) }
-    LaunchedEffect(Unit) {
-        alphaAck = com.readnotes.AlphaWarning.isAcknowledged(context)
-    }
-    if (alphaAck == false) {
-        AlphaWarningDialog(onAcknowledge = {
-            scope.launch {
-                com.readnotes.AlphaWarning.acknowledge(context)
-                alphaAck = true
-            }
-        })
-        return
-    }
-    if (alphaAck == null) {
-        // Still loading the ack flag — render nothing; the splash theme is
-        // still showing underneath.
-        return
-    }
-
     suspend fun bootstrap(): ScreenState = try {
         val session = NotesSession(httpClient, cookieReader).bootstrap().getOrThrow()
         val client = NotesClient(httpClient, session)
@@ -382,14 +367,18 @@ fun ReadNotesApp(
                 scope.launch { state = bootstrap() }
             }
         } else {
-            ScreenState.Login
+            ScreenState.Welcome
         }
     }
 
     when (val s = state) {
         ScreenState.Splash -> CenteredSpinner("Starting up…")
+        ScreenState.Welcome -> WelcomeScreen(
+            onContinue = { state = ScreenState.Login },
+        )
         ScreenState.Login -> LoginScreen(
             themeMode = themeMode,
+            onCancel = { state = ScreenState.Welcome },
             onCookiesArrived = {
                 scope.launch {
                     state = ScreenState.Loading("Signing in…")
@@ -412,7 +401,7 @@ fun ReadNotesApp(
             },
             onSignOut = {
                 cookieReader.clearAuthCookies()
-                state = ScreenState.Login
+                state = ScreenState.Welcome
             },
         )
         is ScreenState.NotesList -> {
@@ -502,7 +491,7 @@ fun ReadNotesApp(
                     bodyIndexJob?.cancel()
                     bodyIndexJob = null
                     scope.launch { SearchBodyIndexStore.clear(context) }
-                    state = ScreenState.Login
+                    state = ScreenState.Welcome
                 },
             )
         }
@@ -581,10 +570,166 @@ private fun ErrorScreen(
     }
 }
 
+/**
+ * Signed-out gate: short 2-page onboarding (industry-standard welcome → CTA),
+ * shown on first launch and after sign-out. Keeps the WebView behind a
+ * deliberate "Sign in" action instead of dumping users on iCloud immediately.
+ */
+@Composable
+private fun WelcomeScreen(onContinue: () -> Unit) {
+    val pagerState = rememberPagerState(pageCount = { 2 })
+    val scope = rememberCoroutineScope()
+    val onLastPage = pagerState.currentPage == 1
+
+    androidx.activity.compose.BackHandler(enabled = pagerState.currentPage > 0) {
+        scope.launch { pagerState.animateScrollToPage(pagerState.currentPage - 1) }
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .windowInsetsPadding(WindowInsets.safeDrawing)
+            .padding(horizontal = 24.dp),
+    ) {
+        HorizontalPager(
+            state = pagerState,
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+        ) { page ->
+            when (page) {
+                0 -> WelcomePage(
+                    icon = {
+                        Icon(
+                            painter = painterResource(R.drawable.ic_launcher_foreground),
+                            contentDescription = null,
+                            tint = Color.Unspecified,
+                            modifier = Modifier.size(120.dp),
+                        )
+                    },
+                    title = "Welcome to ReadNotes",
+                    body = "Read your iCloud Notes on Android.\n\nSearch, copy, and share.",
+                )
+                else -> WelcomePage(
+                    icon = {
+                        Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                            WelcomeFeatureRow(
+                                icon = Icons.Default.Notes,
+                                text = "Browse all your notes, including recently deleted ones",
+                            )
+                            WelcomeFeatureRow(
+                                icon = Icons.Default.Search,
+                                text = "Search by title or note contents",
+                            )
+                            WelcomeFeatureRow(
+                                icon = Icons.Default.Share,
+                                text = "Quickly share an entire note as text",
+                            )
+                        }
+                    },
+                    title = "Sign in with your Apple ID",
+                    body = "ReadNotes is read-only. It will not create, edit, or delete notes in iCloud.",
+                )
+            }
+        }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 16.dp),
+            horizontalArrangement = Arrangement.Center,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            repeat(2) { index ->
+                val selected = pagerState.currentPage == index
+                Box(
+                    modifier = Modifier
+                        .padding(horizontal = 4.dp)
+                        .size(if (selected) 8.dp else 6.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (selected) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.25f),
+                        ),
+                )
+            }
+        }
+
+        Button(
+            onClick = {
+                if (onLastPage) {
+                    onContinue()
+                } else {
+                    scope.launch { pagerState.animateScrollToPage(1) }
+                }
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 24.dp)
+                .height(52.dp),
+        ) {
+            Text(if (onLastPage) "Sign in to iCloud" else "Next")
+        }
+    }
+}
+
+@Composable
+private fun WelcomePage(
+    icon: @Composable () -> Unit,
+    title: String,
+    body: String,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 8.dp),
+        verticalArrangement = Arrangement.Center,
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        icon()
+        Spacer(Modifier.height(28.dp))
+        Text(
+            title,
+            style = MaterialTheme.typography.headlineMedium,
+            fontWeight = FontWeight.Bold,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        )
+        Spacer(Modifier.height(12.dp))
+        Text(
+            body,
+            style = MaterialTheme.typography.bodyLarge,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+        )
+    }
+}
+
+@Composable
+private fun WelcomeFeatureRow(icon: ImageVector, text: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(28.dp),
+        )
+        Text(
+            text,
+            style = MaterialTheme.typography.bodyLarge,
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
 @SuppressLint("SetJavaScriptEnabled")
 @Composable
 private fun LoginScreen(
     themeMode: ThemeMode,
+    onCancel: () -> Unit,
     onCookiesArrived: () -> Unit,
 ) {
     var detected by remember { mutableStateOf(false) }
@@ -595,13 +740,26 @@ private fun LoginScreen(
         ThemeMode.LIGHT -> false
         ThemeMode.DARK -> true
     }
-    // iCloud's pages are always light. Force dark status/nav glyphs while
-    // login is up, then restore the app theme's bar style on exit.
-    DisposableEffect(appDark) {
+    // Match the WebView: iCloud follows the *system* color scheme, not our
+    // in-app theme preference. Scrim + glyph style must track that or the
+    // safe-area bands clash (white bars on a dark iCloud page).
+    val loginDark = systemDark
+    val loginScrim = if (loginDark) Color.Black else Color.White
+    val barContent = if (loginDark) Color.White else Color.Black
+    androidx.activity.compose.BackHandler(onBack = onCancel)
+    DisposableEffect(loginDark, appDark) {
         val transparent = Color.Transparent.toArgb()
         activity?.enableEdgeToEdge(
-            statusBarStyle = SystemBarStyle.light(transparent, transparent),
-            navigationBarStyle = SystemBarStyle.light(transparent, transparent),
+            statusBarStyle = if (loginDark) {
+                SystemBarStyle.dark(transparent)
+            } else {
+                SystemBarStyle.light(transparent, transparent)
+            },
+            navigationBarStyle = if (loginDark) {
+                SystemBarStyle.dark(transparent)
+            } else {
+                SystemBarStyle.light(transparent, transparent)
+            },
         )
         onDispose {
             activity?.enableEdgeToEdge(
@@ -617,14 +775,34 @@ private fun LoginScreen(
     // Edge-to-edge draws under the status bar / cutout / nav bar. Apple's
     // iCloud pages are not inset-aware, so without this the "iCloud" chrome
     // collides with the system clock and punch-hole (seen on Xiaomi + Pixel).
-    Box(
+    Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(Color.White)
+            .background(loginScrim)
             .windowInsetsPadding(WindowInsets.safeDrawing),
     ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            IconButton(onClick = onCancel) {
+                Icon(
+                    Icons.AutoMirrored.Filled.ArrowBack,
+                    contentDescription = "Back",
+                    tint = barContent,
+                )
+            }
+            Text(
+                "Sign in to iCloud",
+                style = MaterialTheme.typography.titleMedium,
+                color = barContent,
+                modifier = Modifier.padding(end = 16.dp),
+            )
+        }
         AndroidView(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
             factory = { ctx ->
                 // Configure cookies for the embedded idmsa.apple.com auth iframe.
                 CookieManager.getInstance().setAcceptCookie(true)
@@ -821,7 +999,7 @@ private fun NotesListScreen(
                         contentAlignment = Alignment.Center,
                     ) {
                         Text(
-                            "Still indexing — try again in a moment.",
+                            "Still indexing. Try again in a moment.",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -1157,7 +1335,7 @@ private fun LockedNoteDialog(title: String, onDismiss: () -> Unit) {
         text = {
             Text(
                     "“$title” is password-protected on your Apple devices. " +
-                    "ReadNotes can’t unlock or show its contents — open it in " +
+                    "ReadNotes can’t unlock or show its contents. Open it in " +
                     "Apple Notes (or iCloud.com) instead.",
             )
         },
@@ -1426,58 +1604,6 @@ private suspend fun decodeAttachment(
         }
     }
     return AttachmentContent.Generic(title, uti)
-}
-
-@Composable
-private fun AlphaWarningDialog(onAcknowledge: () -> Unit) {
-    AlertDialog(
-        onDismissRequest = { /* mandatory: must tap continue */ },
-        icon = {
-            Icon(
-                imageVector = androidx.compose.material.icons.Icons.Filled.Warning,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.error,
-                modifier = Modifier.size(40.dp),
-            )
-        },
-        title = {
-            Text(
-                "Alpha — read this first",
-                style = MaterialTheme.typography.headlineSmall,
-            )
-        },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text(
-                    "ReadNotes is an unofficial, reverse-engineered, alpha-quality " +
-                        "Android client for iCloud Notes. It is not affiliated with Apple.",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                Text(
-                    "This build is read-only: you can browse and copy notes, but not " +
-                        "create, edit, or delete them from the app.",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                Text(
-                    "It might:",
-                    style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.SemiBold),
-                )
-                Text("• stop working at any time if Apple changes their API",
-                    style = MaterialTheme.typography.bodyMedium)
-                Text("• fail to decode some modern or locked notes",
-                    style = MaterialTheme.typography.bodyMedium)
-                Text(
-                    "Use at your own risk.",
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onAcknowledge) {
-                Text("I understand — continue")
-            }
-        },
-    )
 }
 
 @Composable

@@ -1,11 +1,11 @@
 # ReadNotes
 
 A **read-only** Android client for iCloud Notes. Sign in with your Apple ID,
-browse folders, search note contents, open notes, select and copy text — without
+browse notes, search note contents, open notes, select and copy text, without
 creating, editing, or deleting anything from the device.
 
-Built on reverse-engineered CloudKit private-DB access and Apple's `topotext`
-proto. Alpha-quality; expect rough edges.
+Uses CloudKit Web Services and Apple's Notes document format. Independent of
+Apple; expect occasional quirks with uncommon note types.
 
 ### Acknowledgments & lineage
 
@@ -33,23 +33,21 @@ To build from source, see [Build / run](#build--run).
 
 ## Use at your own risk
 
-This is **alpha-quality software**. The UI is read-only, but it still talks to
-your iCloud account. It might:
+ReadNotes talks to your iCloud account with your own credentials. It might:
 
-- stop working at any time if Apple changes their API
+- stop working if Apple changes their API
 - fail to decode some modern, locked, or collaborative notes
-- expose note titles/contents on a device you unlock with your Apple ID
+- show note titles and contents on a device you unlock with your Apple ID
 
-It is **unaffiliated with Apple**. There is no warranty of any kind. The first
-launch blocks behind a dialog you have to acknowledge.
+It is **unaffiliated with Apple**. There is no warranty of any kind.
 
 ## Maintenance & contributing
 
 I use ReadNotes myself and plan to keep maintaining it. Bug reports, ideas, and
-pull requests are welcome — especially fixes you can ship with a PR.
+pull requests are welcome, especially fixes you can ship with a PR.
 
-If you reverse-engineer something new (a proto edge case, a CloudKit quirk), a
-short note in the PR description helps the next person.
+If you dig into a proto edge case or CloudKit quirk, a short note in the PR
+description helps the next person.
 
 ## What works
 
@@ -92,7 +90,6 @@ Write paths from the upstream codebase may still exist under `proto/` and
 ```
 app/src/main/java/com/readnotes/
 ├── MainActivity.kt            Edge-to-edge shell, theme, splash
-├── AlphaWarning.kt            First-launch disclaimer (DataStore)
 ├── SearchBodyIndexStore.kt    On-disk cache for full-text search bodies
 ├── auth/                      WebView cookie harvest, session, device identity
 ├── client/NotesClient.kt      CloudKit HTTP: recents, lookup, folders, assets
@@ -104,7 +101,7 @@ app/src/main/java/com/readnotes/
 │   └── Gzip.kt                gzip / zlib helpers
 ├── theme/                     Colors, typography, theme prefs
 ├── debug/DebugReceiver.kt     Optional adb broadcast helpers
-└── ui/ReadNotesApp.kt         Compose UI: list, search, detail, drawer
+└── ui/ReadNotesApp.kt         Compose UI: welcome, list, search, detail, drawer
 ```
 
 Useful starting points: `NotesClient.kt` (wire calls), `NoteBodyLoader.kt`
@@ -125,7 +122,7 @@ enabled in iCloud. The first launch uses the WebView auth flow.
 
 CloudKit labels fields like `TitleEncrypted`, `SnippetEncrypted`, and
 `TextDataEncrypted` as encrypted types, but over the wire they are typically
-**base64 UTF-8** (title/snippet) or **gzipped protobuf** (body) — not a
+**base64 UTF-8** (title/snippet) or **gzipped protobuf** (body), not a
 client-side crypto layer this app unwraps. iCloud **Advanced Data Protection**
 is a separate mechanism; password-**locked** notes (the lock icon) are different
 again and are not readable here.
@@ -137,9 +134,9 @@ again and are not readable here.
 ## Disclaimer
 
 Unaffiliated with Apple. Uses CloudKit Web Services with the user's own
-credentials to read notes that account already can access. Proto layouts were
-inferred by observing the user's own data; no Apple-internal docs or binaries
-were used.
+credentials to read notes that account already can access. Document formats were
+learned by observing the user's own data through their own account; no
+Apple-internal documentation or binaries were used.
 
 Don't redistribute other people's note captures. Don't encourage device or
 credential sharing.
