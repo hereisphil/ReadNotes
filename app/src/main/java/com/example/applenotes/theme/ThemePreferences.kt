@@ -22,7 +22,7 @@ class ThemePreferences(context: Context) {
     }
 
     companion object {
-        private const val PREFS = "notes_of_fruit_prefs"
+        private const val PREFS = "readnotes_prefs"
         private const val KEY_MODE = "theme_mode"
     }
 }

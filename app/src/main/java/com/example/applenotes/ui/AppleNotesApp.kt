@@ -10,6 +10,7 @@ import androidx.compose.animation.animateColorAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -138,6 +139,7 @@ import com.example.applenotes.R
 import com.example.applenotes.proto.NoteBodyEditor
 import com.example.applenotes.proto.NoteBodyLoader
 import com.example.applenotes.proto.ResolvedNoteBody
+import com.example.applenotes.theme.NotesDrawerLight
 import com.example.applenotes.theme.ThemeMode
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
@@ -473,7 +475,7 @@ private fun ErrorScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Notes of Fruit") },
+                title = { Text("ReadNotes") },
                 navigationIcon = {
                     if (canGoBack) {
                         IconButton(onClick = onBack) {
@@ -748,7 +750,18 @@ private fun FoldersDrawer(
     val nonTrashCount = remember(allNotes) {
         allNotes.count { it.folderRecordName != TRASH_RECORD_NAME }
     }
-    ModalDrawerSheet {
+    val drawerDark = when (themeMode) {
+        ThemeMode.DARK -> true
+        ThemeMode.LIGHT -> false
+        ThemeMode.SYSTEM -> isSystemInDarkTheme()
+    }
+    ModalDrawerSheet(
+        drawerContainerColor = if (drawerDark) {
+            MaterialTheme.colorScheme.surface
+        } else {
+            NotesDrawerLight
+        },
+    ) {
         Column(
             modifier = Modifier
                 .fillMaxHeight()
@@ -761,7 +774,7 @@ private fun FoldersDrawer(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    "Notes of Fruit",
+                    "ReadNotes",
                     style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.weight(1f),
@@ -1019,8 +1032,8 @@ private fun LockedNoteDialog(title: String, onDismiss: () -> Unit) {
         title = { Text("Note is locked") },
         text = {
             Text(
-                "“$title” is password-protected on your Apple devices. " +
-                    "Notes of Fruit can’t unlock or show its contents — open it in " +
+                    "“$title” is password-protected on your Apple devices. " +
+                    "ReadNotes can’t unlock or show its contents — open it in " +
                     "Apple Notes (or iCloud.com) instead.",
             )
         },
@@ -1312,7 +1325,7 @@ private fun AlphaWarningDialog(onAcknowledge: () -> Unit) {
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text(
-                    "Notes of Fruit is an unofficial, reverse-engineered, alpha-quality " +
+                    "ReadNotes is an unofficial, reverse-engineered, alpha-quality " +
                         "Android client for iCloud Notes. It is not affiliated with Apple.",
                     style = MaterialTheme.typography.bodyMedium,
                 )

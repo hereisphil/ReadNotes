@@ -12,7 +12,12 @@ val NotesAmberContainer = Color(0xFFFFE0A6)
 
 val NotesNeutralLight = Color(0xFFFFF9E9)  // surface tint (warm cream)
 val NotesNeutralLight2 = Color(0xFFFFFBF0) // background
+/** Warm paper tone for the navigation drawer (avoids M3 purple surface tint). */
+val NotesDrawerLight = Color(0xFFF4EFE3)
 
 val NotesInk = Color(0xFF1F1B11)
 val NotesInkSoft = Color(0xFF4F4632)
 val NotesPaperLine = Color(0xFFE4DCC4)
+
+/** Launcher / brand blue from the ReadNotes icon. */
+val ReadNotesBlue = Color(0xFF2F6FED)

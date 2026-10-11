@@ -1,8 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Cream background that matches the launcher icon's notepad. -->
-    <color name="splash_background">#FFF8E5</color>
+    <!-- Soft blue-paper splash that matches the ReadNotes launcher. -->
+    <color name="splash_background">#EAF0FA</color>
     <!-- Activity window background — also used as the cold-start backdrop
          before Compose paints. values-night overrides for dark mode. -->
     <color name="window_background">#FFFBF0</color>
+    <color name="ic_launcher_background">#EAF0FA</color>
 </resources>

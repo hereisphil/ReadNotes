@@ -1,11 +1,19 @@
-# Notes of Fruit
+# ReadNotes
 
-An Android client for iCloud Notes. Reverse-engineered from CloudKit's private DB
-API + Apple's `topotext` CRDT proto. Reads and writes notes that round-trip with
-Mac's Apple Notes and iCloud.com.
+A **read-only** Android client for iCloud Notes. Browse folders, search, open
+notes, and copy text — without creating, editing, or deleting anything from
+the device.
 
-This is a research codebase, not a polished product. Treat the README as a field
-report for the next person (or agent) who picks it up.
+Built on reverse-engineered CloudKit private-DB access and Apple's `topotext`
+CRDT proto. This is a research codebase, not a polished product. Treat the
+README as a field report for the next person (or agent) who picks it up.
+
+### Acknowledgments & Lineage
+
+**ReadNotes** is an independent, read-only fork of
+[Notes of Fruit](https://github.com/ericmigi/Notes-Of-Fruit) by
+[ericmigi](https://github.com/ericmigi).
+Huge thanks to the original contributors for building the foundation.
 
 ## Screenshots
 <img height="800" alt="Screenshot_1777485511" src="https://github.com/user-attachments/assets/58914e12-889b-44f5-8515-f842d12f4ac2" />
@@ -26,18 +34,17 @@ If you'd rather build from source, see [Build / run](#build--run) further down.
 
 ## ⚠️ Use at your own risk
 
-This is **alpha-quality software**. It might:
+This is **alpha-quality software**. The UI is read-only, but it still talks to
+your iCloud account. It might:
 
-- corrupt, duplicate, or delete notes in your iCloud account
-- drop formatting in subtle ways when round-tripping through Mac
 - stop working at any time if Apple changes their API
-- fail to handle modern collaborative notes (read-only at best)
+- fail to decode some modern, locked, or collaborative notes
+- expose note titles/contents on a device you unlock with your Apple ID
 
 It is **unaffiliated with Apple** — it talks to Apple's CloudKit Web Services
 API as a third-party client using your own credentials. The proto formats are
 inferred by observation, not from any Apple documentation. There is no
-warranty of any kind. If you have notes you can't afford to lose, back them up
-first or just don't use this app.
+warranty of any kind.
 
 The first launch will block the UI behind a dialog you have to acknowledge so
 you can't say you weren't warned.
